@@ -321,6 +321,51 @@ class JobQueueManager:
             self.db.upsert_job(job)
             return job
 
+    def compare_jobs(
+        self, clip_id: str, job_ids: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Return a structured comparison of completed jobs on the same clip."""
+        all_jobs = self.db.list_jobs_for_clip(clip_id)
+        completed = [j for j in all_jobs if j["status"] == "completed"]
+        if job_ids:
+            wanted = set(job_ids)
+            completed = [j for j in completed if j["job_id"] in wanted]
+
+        comparisons: list[dict[str, Any]] = []
+        for j in completed:
+            res_dir = self.layout.job_result_dir(clip_id, j["job_id"])
+            spec_path = res_dir / "spectrum.json"
+            snr_db = 0.0
+            if spec_path.exists():
+                try:
+                    spec_data = json.loads(spec_path.read_text(encoding="utf-8"))
+                    snr_db = float(spec_data.get("snr_db", 0.0))
+                except (ValueError, OSError):
+                    snr_db = 0.0
+
+            res = j.get("result") or {}
+            comparisons.append(
+                {
+                    "job_id": j["job_id"],
+                    "method": j["method"],
+                    "params": j["params"],
+                    "dominant_hz": res.get("dominant_hz", 0.0),
+                    "dominant_bpm": res.get("dominant_bpm", 0.0),
+                    "snr_db": snr_db,
+                    "extra_metrics": res.get("extra_metrics", {}),
+                    "files": res.get("files", {}),
+                }
+            )
+
+        freqs = [c["dominant_hz"] for c in comparisons if c["dominant_hz"] > 0]
+        freq_spread = round(max(freqs) - min(freqs), 4) if len(freqs) >= 2 else 0.0
+        return {
+            "clip_id": clip_id,
+            "job_count": len(comparisons),
+            "frequency_spread_hz": freq_spread,
+            "comparisons": comparisons,
+        }
+
     def shutdown(self) -> None:
         self._running = False
         self._queue.put(None)
