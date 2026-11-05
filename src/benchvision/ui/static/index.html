@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BenchVision — Raspberry Pi Motion &amp; Video Magnification</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span>BenchVision</span>
+      <span id="active-camera-badge" class="badge">Detecting Camera...</span>
+    </div>
+    <nav class="nav-tabs" aria-label="Main Navigation">
+      <button class="nav-tab active" data-page="record" onclick="switchPage('record')">1. Record</button>
+      <button class="nav-tab" data-page="library" onclick="switchPage('library')">2. Library</button>
+      <button class="nav-tab" data-page="process" onclick="switchPage('process')">3. Process &amp; Compare</button>
+      <button class="nav-tab" data-page="analysis" onclick="switchPage('analysis')">4. Analysis</button>
+      <button class="nav-tab" data-page="system" onclick="switchPage('system')">5. System</button>
+      <button onclick="openSetupModal()">Camera Setup</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <!-- PAGE 1: RECORD -->
+    <section id="page-record" class="page-section active">
+      <div id="shutter-warning-banner" class="banner warning" style="display: none;"></div>
+      <div class="grid-2">
+        <div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Live Aiming &amp; Focus Preview</span>
+              <div style="display: flex; gap: 0.5rem;">
+                <a class="btn" href="/api/cameras/preview.jpg" download="snapshot.jpg">Snapshot</a>
+                <button onclick="togglePreviewFullscreen()">Fullscreen</button>
+              </div>
+            </div>
+            <div class="video-box" id="preview-box">
+              <img id="live-preview-img" src="/api/cameras/preview.mjpg" alt="Live Camera Preview" />
+            </div>
+            <div style="margin-top: 0.9rem;">
+              <div class="card-header" style="margin-bottom: 0.4rem;">
+                <span style="font-size: 0.85rem; color: var(--text-muted);">Live ROI Mean Intensity Signal (Non-Blocking)</span>
+              </div>
+              <canvas id="live-roi-canvas" class="plot-canvas" style="height: 110px;"></canvas>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Capture Quality Guidance</span>
+            </div>
+            <ul style="padding-left: 1.2rem; font-size: 0.86rem; color: var(--text-muted); line-height: 1.7;">
+              <li><strong>Rigid Tripod / Mount:</strong> Camera shake is amplified alongside target motion. Clamp the Pi or webcam firmly.</li>
+              <li><strong>Lighting Flicker (50/60 Hz):</strong> Use DC LED or natural daylight. Mains AC lighting flicker aliases into low-Hz bands.</li>
+              <li><strong>Lock Exposure &amp; Gain:</strong> Always click <em>"1. Lock Camera Settings"</em> before recording so auto-exposure never shifts mid-clip.</li>
+              <li><strong>Rolling vs. Global Shutter:</strong> Rolling-shutter webcams work well for pulse/breathing (&lt;5 Hz); use the Raspberry Pi Global Shutter Camera (IMX296) for high-frequency mechanical vibrations.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Step 1: Lock Exposure, Gain, WB &amp; ROI</span>
+              <span id="lock-status-badge" class="badge">Unlocked</span>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="rec-width">Width (px)</label>
+                <input id="rec-width" type="number" value="640" onchange="runPreflight()" />
+              </div>
+              <div>
+                <label for="rec-height">Height (px)</label>
+                <input id="rec-height" type="number" value="480" onchange="runPreflight()" />
+              </div>
+              <div>
+                <label for="rec-fps">Target FPS</label>
+                <input id="rec-fps" type="number" value="30" onchange="runPreflight()" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="ctrl-exposure">Exposure (&mu;s)</label>
+                <input id="ctrl-exposure" type="number" value="10000" step="500" />
+              </div>
+              <div>
+                <label for="ctrl-gain">Gain</label>
+                <input id="ctrl-gain" type="number" value="1.0" step="0.5" />
+              </div>
+              <div>
+                <label for="ctrl-wb">White Balance (K)</label>
+                <input id="ctrl-wb" type="number" value="4600" step="100" />
+              </div>
+              <div>
+                <label for="ctrl-focus">Focus Position</label>
+                <input id="ctrl-focus" type="number" value="0.0" step="0.5" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="roi-x">ROI X (optional)</label>
+                <input id="roi-x" type="number" placeholder="0" onchange="runPreflight()" />
+              </div>
+              <div>
+                <label for="roi-y">ROI Y</label>
+                <input id="roi-y" type="number" placeholder="0" onchange="runPreflight()" />
+              </div>
+              <div>
+                <label for="roi-w">ROI Width</label>
+                <input id="roi-w" type="number" placeholder="Full" onchange="runPreflight()" />
+              </div>
+              <div>
+                <label for="roi-h">ROI Height</label>
+                <input id="roi-h" type="number" placeholder="Full" onchange="runPreflight()" />
+              </div>
+            </div>
+            <button style="width: 100%;" onclick="lockCameraControls()">1. Lock Camera Settings (Disable Auto-Adjust)</button>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Step 2: Nyquist Validation &amp; Lossless Recording</span>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="rec-title">Clip Title</label>
+                <input id="rec-title" type="text" value="Resting Pulse Capture" />
+              </div>
+              <div>
+                <label for="rec-duration">Duration (seconds)</label>
+                <input id="rec-duration" type="number" value="6" min="2" max="120" onchange="runPreflight()" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="rec-max-hz">Highest Target Freq (Hz)</label>
+                <input id="rec-max-hz" type="number" value="3.5" step="0.5" onchange="runPreflight()" />
+              </div>
+              <div>
+                <label for="rec-format">Lossless Storage Format</label>
+                <select id="rec-format" onchange="runPreflight()">
+                  <option value="mjpeg_q100">Q100 MJPEG + Lossless Frame Store</option>
+                  <option value="ffv1_mkv">Lossless FFV1 / Archive</option>
+                  <option value="raw_npz">Compressed Raw NumPy (.npz)</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="preflight-banner" class="banner">Checking Nyquist &amp; disk space...</div>
+
+            <button id="btn-record" class="primary" style="width: 100%; padding: 0.75rem;" onclick="startRecording()">
+              2. Record Lossless Clip
+            </button>
+            <div id="record-result-banner" class="banner success" style="display: none; margin-top: 0.85rem;"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PAGE 2: LIBRARY -->
+    <section id="page-library" class="page-section">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Recorded Clips Library (Unmodified Raw Sources)</span>
+          <button onclick="loadLibrary()">Refresh Library</button>
+        </div>
+        <div id="library-grid" class="grid-3"></div>
+      </div>
+    </section>
+
+    <!-- PAGE 3: PROCESS & COMPARE -->
+    <section id="page-process" class="page-section">
+      <div class="grid-2">
+        <div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Submit Offline Magnification Job</span>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="proc-clip">Source Clip</label>
+                <select id="proc-clip" onchange="onSelectProcessClip()"></select>
+              </div>
+              <div>
+                <label for="proc-method">Magnification Method Plugin</label>
+                <select id="proc-method" onchange="updateJobTimeEstimate()"></select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="proc-preset">Frequency Band Preset</label>
+                <select id="proc-preset" onchange="applyPresetSelection()"></select>
+              </div>
+              <div>
+                <label for="proc-filter">Temporal Filter Type</label>
+                <select id="proc-filter">
+                  <option value="butterworth">Zero-Phase Butterworth SOS</option>
+                  <option value="ideal">Ideal FFT Bandpass</option>
+                  <option value="iir">Causal IIR (Low Memory)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="proc-low-hz">Low Cutoff (Hz)</label>
+                <input id="proc-low-hz" type="number" step="0.1" value="0.8" />
+              </div>
+              <div>
+                <label for="proc-high-hz">High Cutoff (Hz)</label>
+                <input id="proc-high-hz" type="number" step="0.1" value="3.0" />
+              </div>
+              <div>
+                <label for="proc-alpha">Amplification (&alpha;)</label>
+                <input id="proc-alpha" type="number" step="1" value="25" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label for="proc-levels">Pyramid Levels</label>
+                <input id="proc-levels" type="number" min="1" max="6" value="4" />
+              </div>
+              <div>
+                <label for="proc-blur">Spatial Blur (&sigma;)</label>
+                <input id="proc-blur" type="number" step="0.5" value="1.5" />
+              </div>
+              <div>
+                <label for="proc-max-width">Processing Width (px)</label>
+                <input id="proc-max-width" type="number" value="640" onchange="updateJobTimeEstimate()" />
+              </div>
+            </div>
+            <div id="job-estimate-banner" class="banner">Estimated processing time: ~3.5s</div>
+            <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+              <button class="primary" style="flex: 1;" onclick="submitProcessingJob()">Run Magnification Job</button>
+              <button onclick="autoDetectBandForClip()">Auto-Find Dominant Band</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Background Job Queue</span>
+              <button onclick="loadJobs()">Refresh Queue</button>
+            </div>
+            <div id="jobs-list"></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Result Viewer &amp; Method Comparison</span>
+              <select id="view-output-mode" style="width: auto;" onchange="updateComparisonVideoMode()">
+                <option value="comparison_sbs_mp4">Side-by-Side (Original vs. Magnified)</option>
+                <option value="magnified_mp4">Magnified Only</option>
+                <option value="heatmap_mp4">Motion-Energy Heatmap Overlay</option>
+              </select>
+            </div>
+            <div class="video-box">
+              <video id="result-video-player" controls loop muted playsinline></video>
+            </div>
+            <div id="result-download-bar" style="display: flex; gap: 0.6rem; margin-top: 0.85rem; flex-wrap: wrap;"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Multi-Method Comparison on Selected Clip</span>
+            </div>
+            <div id="comparison-table-wrap"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PAGE 4: ANALYSIS -->
+    <section id="page-analysis" class="page-section">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Spectral &amp; Frequency Analysis (FFT / Welch PSD / Spectrogram)</span>
+          <div style="display: flex; gap: 0.6rem; align-items: center;">
+            <select id="analysis-job-select" style="width: 300px;" onchange="loadJobAnalysis()"></select>
+            <a id="btn-export-csv" class="btn primary" href="#" download="signal.csv">Export Signal CSV</a>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-box">
+            <div class="kpi-label">Dominant Frequency</div>
+            <div class="kpi-value" id="kpi-dom-hz">— Hz</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">Oscillation / Pulse Rate</div>
+            <div class="kpi-value" id="kpi-dom-bpm">— BPM</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">In-Band SNR</div>
+            <div class="kpi-value" id="kpi-snr">— dB</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">Suggested Auto-Band</div>
+            <div class="kpi-value" id="kpi-sug-band">— Hz</div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <div>
+            <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">ROI Temporal Signal (Raw Detrended vs. Bandpass Filtered)</h3>
+            <canvas id="canvas-timeseries" class="plot-canvas"></canvas>
+          </div>
+          <div>
+            <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">FFT Amplitude &amp; Welch PSD Spectrum (Hz)</h3>
+            <canvas id="canvas-fft" class="plot-canvas"></canvas>
+          </div>
+        </div>
+
+        <div style="margin-top: 1.15rem;">
+          <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">2D STFT Time-Frequency Spectrogram (dB)</h3>
+          <canvas id="canvas-spectrogram" class="plot-canvas"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- PAGE 5: SYSTEM -->
+    <section id="page-system" class="page-section">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">System Version, Storage &amp; Updates</span>
+            <button class="primary" onclick="triggerSystemUpdate()">Check / Update Now</button>
+          </div>
+          <div class="kpi-grid">
+            <div class="kpi-box">
+              <div class="kpi-label">Current Version</div>
+              <div class="kpi-value" id="sys-version">0.1.0</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Free Disk Space</div>
+              <div class="kpi-value" id="sys-free-gb">— GB</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Data Folder Size</div>
+              <div class="kpi-value" id="sys-data-mb">— MB</div>
+            </div>
+          </div>
+          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+            Data Directory: <code id="sys-data-dir">./data</code>
+          </p>
+          <h3 style="font-size: 0.92rem; margin: 1rem 0 0.5rem;">Release Changelog</h3>
+          <div id="sys-changelog" style="font-size: 0.85rem; color: var(--text-muted);"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Structured Application Logs</span>
+            <button onclick="loadSystemStatus()">Refresh Logs</button>
+          </div>
+          <div id="sys-logs" class="log-box"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- FIRST-RUN CAMERA SETUP MODAL -->
+  <div id="setup-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <div class="card-header">
+        <span class="card-title">Camera Setup &amp; Lens Configuration</span>
+        <button onclick="closeSetupModal()">Close</button>
+      </div>
+      <p style="font-size: 0.88rem; color: var(--text-muted); margin-bottom: 1rem;">
+        Select a connected USB V4L2 webcam, Raspberry Pi CSI camera (Picamera2), or the Synthetic Reference Oscillator.
+      </p>
+      <div class="form-row">
+        <div>
+          <label for="setup-camera-select">Detected Camera</label>
+          <select id="setup-camera-select"></select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div>
+          <label for="setup-focal">Lens Focal Length (mm)</label>
+          <input id="setup-focal" type="number" step="0.1" value="4.0" />
+        </div>
+        <div>
+          <label for="setup-fov">Field of View (&deg;)</label>
+          <input id="setup-fov" type="number" step="1" value="60" />
+        </div>
+        <div>
+          <label for="setup-focus-mode">Focus Type</label>
+          <select id="setup-focus-mode">
+            <option value="fixed">Fixed Focus</option>
+            <option value="manual">Manual Ring / C-Mount</option>
+            <option value="autofocus">Motorized Autofocus</option>
+          </select>
+        </div>
+      </div>
+      <button class="primary" style="width: 100%; margin-top: 0.5rem;" onclick="saveCameraSetup()">
+        Activate Selected Camera &amp; Save Lens Profile
+      </button>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
