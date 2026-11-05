@@ -17,7 +17,8 @@ SRC_DIR = ROOT_DIR / "src"
 
 
 def main() -> None:
-    if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+    venv_dir = ROOT_DIR / ".venv"
+    if VENV_PYTHON.exists() and Path(sys.prefix) != venv_dir:
         os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 
     if str(SRC_DIR) not in sys.path:

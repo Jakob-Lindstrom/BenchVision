@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install system libraries and run verification tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 v4l-utils
+          pip install -e ".[dev]"
+          ruff check src tests test.py
+          pytest
+
+      - name: Package release archive
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE="benchvision-${TAG}.tar.gz"
+          tar --exclude=".git" --exclude=".venv" --exclude="data" -czf "${ARCHIVE}" .
+          echo "RELEASE_ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.RELEASE_ARCHIVE }}
+          generate_release_notes: true
+
