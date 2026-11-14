@@ -1,5 +1,19 @@
+# User recordings, SQLite DB, config, and logs
+data/
+!data/.gitkeep
+
+# Media & capture artifacts
+*.mp4
+*.mkv
+*.avi
+*.npz
+*.wav
+*.gif
+
+# Python bytecode & packaging
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 *.so
 .Python
@@ -18,11 +32,28 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Virtual environments
 .venv/
 venv/
 ENV/
+env/
+
+# Test & linter caches
 .pytest_cache/
 .ruff_cache/
-data/
-!data/.gitkeep
+.mypy_cache/
+.coverage
+htmlcov/
 
+# OS & editor temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+.idea/
+.vscode/

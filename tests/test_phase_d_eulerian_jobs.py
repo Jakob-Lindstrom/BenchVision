@@ -7,14 +7,14 @@ import hashlib
 import numpy as np
 import pytest
 
-from benchvision.cameras.manager import CameraManager
-from benchvision.core.config import AppSettings
-from benchvision.jobs.manager import JobQueueManager
-from benchvision.processing.base import JobParams
-from benchvision.processing.filters import apply_temporal_bandpass, find_dominant_frequency
-from benchvision.recording.recorder import RecordingService
-from benchvision.storage.db import Database
-from benchvision.storage.layout import DataLayout
+from src.cameras.manager import CameraManager
+from src.core.config import AppSettings
+from src.jobs.manager import JobQueueManager
+from src.processing.base import JobParams
+from src.processing.filters import apply_temporal_bandpass, find_dominant_frequency
+from src.recording.recorder import RecordingService
+from src.storage.db import Database
+from src.storage.layout import DataLayout
 
 
 @pytest.mark.parametrize("filter_type", ["ideal", "butterworth", "iir"])

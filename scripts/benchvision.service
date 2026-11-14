@@ -10,7 +10,7 @@ Group=video
 WorkingDirectory=__APP_DIR__
 Environment="BENCHVISION_DATA_DIR=__APP_DIR__/data"
 Environment="BENCHVISION_PORT=8000"
-ExecStart=__APP_DIR__/.venv/bin/python3 -m benchvision.main --host 0.0.0.0 --port 8000 --data-dir __APP_DIR__/data
+ExecStart=__APP_DIR__/.venv/bin/python3 __APP_DIR__/run.py --host 0.0.0.0 --port 8000 --data-dir __APP_DIR__/data
 Restart=on-failure
 RestartSec=5
 

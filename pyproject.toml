@@ -31,17 +31,18 @@ dev = [
 ]
 
 [project.scripts]
-benchvision = "benchvision.main:cli_main"
+benchvision = "src.main:cli_main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["src*"]
 
 [tool.setuptools.package-data]
-benchvision = ["ui/static/**/*"]
+src = ["ui/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]
 addopts = "-v"
 
 [tool.ruff]

@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from benchvision.analysis.spectrum import compute_roi_spectrum_analysis, compute_signal_spectrum
-from benchvision.cameras.synthetic import SyntheticCameraBackend
+from src.analysis.spectrum import compute_roi_spectrum_analysis, compute_signal_spectrum
+from src.cameras.synthetic import SyntheticCameraBackend
 
 
 def test_signal_spectrum_welch_and_spectrogram() -> None:
@@ -45,7 +45,7 @@ def test_auto_find_band_from_synthetic_video() -> None:
 
 
 def test_frame0_transient_spike_suppression() -> None:
-    from benchvision.processing.filters import apply_temporal_bandpass
+    from src.processing.filters import apply_temporal_bandpass
 
     fps = 30.0
     n = 180

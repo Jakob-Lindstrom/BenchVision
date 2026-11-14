@@ -8,8 +8,8 @@ import cv2
 import numpy as np
 from fastapi.testclient import TestClient
 
-from benchvision.cameras.v4l2_usb import V4L2UsbCameraBackend
-from benchvision.main import create_app
+from src.cameras.v4l2_usb import V4L2UsbCameraBackend
+from src.main import create_app
 
 
 def test_full_api_and_ui_workflow(temp_data_dir: Path) -> None:
@@ -601,7 +601,7 @@ def test_dual_camera_part1_setup_preview_and_recording(temp_data_dir: Path) -> N
 
 def test_roi_crop_and_60fps_mode_switch_recording(temp_data_dir: Path) -> None:
     """Verify ROI crop & 60 FPS switching when camera initially streams at 640x480 @ 30 FPS."""
-    from benchvision.cameras.v4l2_usb import V4L2UsbCameraBackend, parse_v4l2_formats_ext_output
+    from src.cameras.v4l2_usb import V4L2UsbCameraBackend, parse_v4l2_formats_ext_output
 
     sample_brio_ext = """
 ioctl: VIDIOC_ENUM_FMT
@@ -652,8 +652,8 @@ ioctl: VIDIOC_ENUM_FMT
         ).json()
         assert rec["width"] == 946
         assert rec["height"] == 400
-        assert rec["fps_target"] == 60
-        assert abs(rec["fps_achieved"] - 60.0) < 1.5
+        assert rec["target_fps"] == 60
+        assert abs(rec["achieved_fps"] - 60.0) < 1.5
         assert cam.is_streaming_at(1280, 720, 60)
 
 

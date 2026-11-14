@@ -5,14 +5,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from benchvision.cameras.manager import CameraManager
-from benchvision.cameras.synthetic import SyntheticCameraBackend
-from benchvision.core.config import AppSettings
-from benchvision.jobs.manager import JobQueueManager
-from benchvision.processing import PROCESSING_REGISTRY, JobParams, list_processing_methods
-from benchvision.recording.recorder import RecordingService
-from benchvision.storage.db import Database
-from benchvision.storage.layout import DataLayout
+from src.cameras.manager import CameraManager
+from src.cameras.synthetic import SyntheticCameraBackend
+from src.core.config import AppSettings
+from src.jobs.manager import JobQueueManager
+from src.processing import PROCESSING_REGISTRY, JobParams, list_processing_methods
+from src.recording.recorder import RecordingService
+from src.storage.db import Database
+from src.storage.layout import DataLayout
 
 
 @pytest.mark.parametrize(

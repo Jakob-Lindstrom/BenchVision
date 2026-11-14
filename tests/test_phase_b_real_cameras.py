@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from benchvision.cameras import CAMERA_REGISTRY, CameraManager
-from benchvision.cameras.picamera2_backend import Picamera2Backend, resolve_sensor_profile
-from benchvision.cameras.v4l2_usb import (
+from src.cameras import CAMERA_REGISTRY, CameraManager
+from src.cameras.picamera2_backend import Picamera2Backend, resolve_sensor_profile
+from src.cameras.v4l2_usb import (
     V4L2UsbCameraBackend,
     parse_v4l2_ctrls_output,
     parse_v4l2_devices_output,
 )
-from benchvision.core.config import AppSettings
+from src.core.config import AppSettings
 
 SAMPLE_V4L2_DEVICES = """bcm2835-codec-decode (platform:bcm2835-codec):
 \t/dev/video10

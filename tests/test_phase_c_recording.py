@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from benchvision.cameras.manager import CameraManager
-from benchvision.core.config import AppSettings
-from benchvision.recording.preview import LivePreviewService
-from benchvision.recording.recorder import RecordingService, load_clip_frames_and_timestamps
-from benchvision.recording.validators import (
+from src.cameras.manager import CameraManager
+from src.core.config import AppSettings
+from src.recording.preview import LivePreviewService
+from src.recording.recorder import RecordingService, load_clip_frames_and_timestamps
+from src.recording.validators import (
     estimate_recording_storage,
     validate_nyquist_and_duration,
 )
-from benchvision.storage.db import Database
-from benchvision.storage.layout import DataLayout
+from src.storage.db import Database
+from src.storage.layout import DataLayout
 
 
 def test_nyquist_validation() -> None:

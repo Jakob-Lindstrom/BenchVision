@@ -8,12 +8,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from benchvision import SCHEMA_VERSION
-from benchvision.cameras import CAMERA_REGISTRY
-from benchvision.cameras.synthetic import SyntheticCameraBackend
-from benchvision.core.config import load_or_create_settings
-from benchvision.core.logging import configure_logging, read_recent_logs
-from benchvision.storage.layout import DataLayout
+from src import SCHEMA_VERSION
+from src.cameras import CAMERA_REGISTRY
+from src.cameras.synthetic import SyntheticCameraBackend
+from src.core.config import load_or_create_settings
+from src.core.logging import configure_logging, read_recent_logs
+from src.storage.layout import DataLayout
 
 
 def test_config_creation_and_migration(temp_data_dir: Path) -> None:

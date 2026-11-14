@@ -39,7 +39,24 @@ def test_update_script_check_only() -> None:
 def test_ci_workflows_and_readme_present() -> None:
     assert (ROOT / ".github" / "workflows" / "ci.yml").exists()
     assert (ROOT / ".github" / "workflows" / "release.yml").exists()
+    assert (ROOT / "src" / "main.py").exists()
+    assert not (ROOT / "benchvision").exists()
+    assert not (ROOT / "src" / "benchvision").exists()
+    assert (ROOT / "run.py").exists()
+    assert not (ROOT / "test.py").exists()
+    assert (ROOT / "requirements.txt").exists()
+
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "scripts/install.sh" in readme
     assert "http://" in readme
+    assert "--system-site-packages" in readme
+
+    help_out = subprocess.check_output(
+        [str(ROOT / ".venv" / "bin" / "python3"), str(ROOT / "run.py"), "--help"],
+        text=True,
+    )
+    assert "--host" in help_out
+    assert "--port" in help_out
+    assert "--data-dir" in help_out
+    assert "--reload" in help_out
 

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from benchvision.cameras.synthetic import SyntheticCameraBackend
-from benchvision.core.config import AppSettings, load_or_create_settings
-from benchvision.storage.layout import DataLayout
+from src.cameras.synthetic import SyntheticCameraBackend
+from src.core.config import AppSettings, load_or_create_settings
+from src.storage.layout import DataLayout
 
 
 @pytest.fixture()

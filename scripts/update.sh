@@ -13,7 +13,7 @@ HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 cd "${APP_DIR}"
 
 CURRENT_REV="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
-CURRENT_VER="$("${VENV_DIR}/bin/python3" -c 'import sys; sys.path.insert(0, "src"); import benchvision; print(benchvision.__version__)' 2>/dev/null || echo '0.1.0')"
+CURRENT_VER="$("${VENV_DIR}/bin/python3" -c 'import sys; sys.path.insert(0, "."); import src; print(src.__version__)' 2>/dev/null || echo '0.1.0')"
 
 if [ "${1:-}" = "--check-only" ]; then
   echo "Current version: v${CURRENT_VER} (commit ${CURRENT_REV:0:7}). Data folder (${APP_DIR}/data) is intact."
@@ -60,7 +60,7 @@ if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled "${SERVICE_NAME}
 fi
 
 echo "[4/4] Running health check..."
-if "${VENV_DIR}/bin/python3" -c 'import sys; sys.path.insert(0, "src"); from benchvision.main import create_app; assert create_app is not None'; then
+if "${VENV_DIR}/bin/python3" -c 'import sys; sys.path.insert(0, "."); from src.main import create_app; assert create_app is not None'; then
   if curl -fsS --max-time 3 "${HEALTH_URL}" >/dev/null 2>&1; then
     echo "HTTP health check passed at ${HEALTH_URL}."
   else

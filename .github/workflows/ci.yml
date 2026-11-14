@@ -28,7 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run Ruff linter
-        run: ruff check src tests test.py
+        run: ruff check src tests run.py
 
       - name: Run Pytest unit & integration tests
         run: pytest

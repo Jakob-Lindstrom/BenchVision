@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 v4l-utils
           pip install -e ".[dev]"
-          ruff check src tests test.py
+          ruff check src tests run.py
           pytest
 
       - name: Package release archive
