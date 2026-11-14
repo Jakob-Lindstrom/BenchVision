@@ -35,6 +35,7 @@ class SyntheticCameraBackend(CameraBackend):
         amplitude_px: float = 0.75,
         color_pulse_amp: float = 4.5,
         noise_std: float = 0.25,
+        phase_offset_rad: float = 0.0,
         realtime: bool = False,
     ) -> None:
         super().__init__(camera_id=camera_id, device_path=device_path, name=name)
@@ -43,6 +44,9 @@ class SyntheticCameraBackend(CameraBackend):
         self.amplitude_px = amplitude_px
         self.color_pulse_amp = color_pulse_amp
         self.noise_std = noise_std
+        self.phase_offset_rad = (
+            math.pi / 2.0 if camera_id.endswith(":1") and phase_offset_rad == 0.0 else phase_offset_rad
+        )
         self.realtime = realtime
         self._frame_idx = 0
         self._start_mono_ns = 0
@@ -58,9 +62,16 @@ class SyntheticCameraBackend(CameraBackend):
                 "camera_id": "synthetic:0",
                 "backend_type": cls.backend_key,
                 "name": "Synthetic Reference Oscillator (2.0 Hz / 120 BPM)",
-                "device_path": "sim://oscillator",
+                "device_path": "sim://oscillator-a",
                 "shutter_type": "global",
-            }
+            },
+            {
+                "camera_id": "synthetic:1",
+                "backend_type": cls.backend_key,
+                "name": "Synthetic Orthogonal Reference B (2.0 Hz, 90° Phase / Z-Axis)",
+                "device_path": "sim://oscillator-b",
+                "shutter_type": "global",
+            },
         ]
 
     def _build_grid(self, width: int, height: int) -> None:
@@ -72,6 +83,9 @@ class SyntheticCameraBackend(CameraBackend):
         self.current_controls.width = width
         self.current_controls.height = height
         self.current_controls.fps = fps
+        self._stream_width = int(width)
+        self._stream_height = int(height)
+        self._stream_fps = int(fps)
         self._frame_idx = 0
         self._start_mono_ns = time.monotonic_ns()
         self._start_wall_ns = time.time_ns()
@@ -80,6 +94,9 @@ class SyntheticCameraBackend(CameraBackend):
 
     def stop(self) -> None:
         self.running = False
+        self._stream_width = 0
+        self._stream_height = 0
+        self._stream_fps = 0
 
     def get_frame(self, timeout: float = 2.0) -> FramePacket:
         if not self.running:
@@ -112,8 +129,9 @@ class SyntheticCameraBackend(CameraBackend):
             t_sec = self._frame_idx / float(fps)
 
         # Sub-pixel horizontal and vertical displacement at primary & secondary frequencies
-        dx = self.amplitude_px * math.sin(2.0 * math.pi * self.oscillation_hz * t_sec)
-        dy = 0.35 * self.amplitude_px * math.sin(2.0 * math.pi * self.secondary_hz * t_sec)
+        phi = self.phase_offset_rad
+        dx = self.amplitude_px * math.sin(2.0 * math.pi * self.oscillation_hz * t_sec + phi)
+        dy = 0.35 * self.amplitude_px * math.sin(2.0 * math.pi * self.secondary_hz * t_sec + 0.5 * phi)
 
         cx = w * 0.5 + dx
         cy = h * 0.5 + dy
@@ -127,7 +145,7 @@ class SyntheticCameraBackend(CameraBackend):
         base = 95.0 + 90.0 * envelope * (0.5 + 0.5 * carrier)
 
         # Add localized periodic intensity/color pulsation in central region (simulates pulse/rPPG)
-        pulse = self.color_pulse_amp * math.sin(2.0 * math.pi * self.oscillation_hz * t_sec)
+        pulse = self.color_pulse_amp * math.sin(2.0 * math.pi * self.oscillation_hz * t_sec + phi)
         green_channel = base + pulse * envelope
         red_channel = base + 0.4 * pulse * envelope
         blue_channel = base - 0.2 * pulse * envelope

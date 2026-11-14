@@ -4,6 +4,7 @@ from typing import Any
 
 from benchvision.processing import (  # noqa: F401
     eulerian,
+    motion_extraction,
     optical_flow,
     phase_steerable,
     riesz,
@@ -21,7 +22,14 @@ from benchvision.processing.base import (
 
 def list_processing_methods() -> list[dict[str, Any]]:
     """Return metadata for all registered magnification/analysis plugins."""
-    ordered = ["eulerian", "riesz", "phase_steerable", "optical_flow", "rppg"]
+    ordered = [
+        "eulerian",
+        "riesz",
+        "phase_steerable",
+        "motion_extraction",
+        "optical_flow",
+        "rppg",
+    ]
     keys = [k for k in ordered if k in PROCESSING_REGISTRY.list_keys()]
     for k in PROCESSING_REGISTRY.list_keys():
         if k not in keys:

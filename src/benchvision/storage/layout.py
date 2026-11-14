@@ -70,3 +70,4 @@ class DataLayout:
             "data_dir_bytes": data_bytes,
             "free_gb": round(usage.free / (1024**3), 2),
         }
+

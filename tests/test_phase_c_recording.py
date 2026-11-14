@@ -90,3 +90,4 @@ def test_live_preview_and_lossless_recording(
     listed = db.list_recordings()
     assert len(listed) == 1
     assert listed[0]["clip_id"] == meta["clip_id"]
+

@@ -88,6 +88,18 @@ class CameraBackend(ABC):
         self.name = name
         self.running: bool = False
         self.current_controls = CameraControlSettings()
+        self._stream_width: int = 0
+        self._stream_height: int = 0
+        self._stream_fps: int = 0
+
+    def is_streaming_at(self, width: int, height: int, fps: int) -> bool:
+        """Return True if the camera is actively streaming at the exact requested geometry and FPS."""
+        return bool(
+            self.running
+            and self._stream_width == int(width)
+            and self._stream_height == int(height)
+            and self._stream_fps == int(fps)
+        )
 
     @classmethod
     @abstractmethod
@@ -130,5 +142,17 @@ class CameraBackend(ABC):
         payload["exposure_us"] = min(exp_us, max_exposure_us)
         return self.set_controls(payload)
 
+    def unlock_controls(self) -> CameraControlSettings:
+        """Re-enable auto-exposure, auto-white-balance, and autofocus for aiming/previewing."""
+        return self.set_controls(
+            {
+                "auto_exposure": True,
+                "auto_wb": True,
+                "autofocus": True,
+                "locked": False,
+            }
+        )
+
 
 CAMERA_REGISTRY: PluginRegistry[CameraBackend] = PluginRegistry("camera")
+

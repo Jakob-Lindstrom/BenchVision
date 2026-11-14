@@ -18,6 +18,9 @@ class LensConfig(BaseModel):
 
     focal_length_mm: float = Field(default=4.0, ge=0.5, le=500.0)
     fov_degrees: float = Field(default=60.0, ge=5.0, le=220.0)
+    target_distance_cm: float = Field(default=50.0, ge=1.0, le=5000.0)
+    ruler_mm_per_pixel: float | None = Field(default=None, ge=0.0, le=100.0)
+    ruler_ref_width_px: int = Field(default=640, ge=16, le=7680)
     focus_mode: str = Field(default="fixed", pattern="^(fixed|manual|autofocus)$")
     default_exposure_us: int = Field(default=10000, ge=100, le=500000)
     default_gain: float = Field(default=1.0, ge=0.0, le=64.0)
@@ -79,6 +82,36 @@ DEFAULT_PRESETS: list[FrequencyPreset] = [
         min_duration_s=5.0,
     ),
     FrequencyPreset(
+        id="posy_motion_extract",
+        name="Motion Extraction (Posy Gray Cancellation)",
+        description="Cancels static background to flat 50% gray, isolating only moving edges & vibrations",
+        low_hz=0.8,
+        high_hz=6.0,
+        default_alpha=15.0,
+        recommended_method="motion_extraction",
+        min_duration_s=5.0,
+    ),
+    FrequencyPreset(
+        id="posy_rgb_trail",
+        name="Posy RGB Chrono-Chromatic Trail",
+        description="Maps R=t, G=t-k, B=t-2k so stationary objects stay normal color while moving edges split into rainbow trails",
+        low_hz=0.8,
+        high_hz=6.0,
+        default_alpha=20.0,
+        recommended_method="posy_rgb_trail",
+        min_duration_s=5.0,
+    ),
+    FrequencyPreset(
+        id="posy_peak_hold",
+        name="Posy Motion Persistence (Peak-Hold Envelope)",
+        description="Accumulates frame differences over a decaying window so rapid vibrations leave a glowing motion envelope",
+        low_hz=1.0,
+        high_hz=8.0,
+        default_alpha=20.0,
+        recommended_method="posy_peak_hold",
+        min_duration_s=5.0,
+    ),
+    FrequencyPreset(
         id="auto_find",
         name="Auto-Find Dominant Band",
         description="Automatically detects the strongest periodic peak in the ROI spectrum",
@@ -109,6 +142,9 @@ class AppSettings(BaseSettings):
     # First-run & active camera configuration
     setup_completed: bool = False
     active_camera_id: str = "synthetic:0"
+    dual_camera_enabled: bool = False
+    secondary_camera_id: str = "synthetic:1"
+    dual_sync_mode: str = Field(default="software", pattern="^(hardware|software|independent)$")
     default_width: int = 640
     default_height: int = 480
     default_fps: int = 30
@@ -117,6 +153,9 @@ class AppSettings(BaseSettings):
     camera_lenses: dict[str, LensConfig] = Field(
         default_factory=lambda: {
             "synthetic:0": LensConfig(
+                focal_length_mm=6.0, fov_degrees=55.0, focus_mode="fixed"
+            ),
+            "synthetic:1": LensConfig(
                 focal_length_mm=6.0, fov_degrees=55.0, focus_mode="fixed"
             ),
             "v4l2:/dev/video0": LensConfig(
@@ -143,6 +182,13 @@ def migrate_config_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             migrated["presets"] = [p.model_dump() for p in DEFAULT_PRESETS]
         migrated["schema_version"] = SCHEMA_VERSION
         changed = True
+
+    if "presets" in migrated and isinstance(migrated["presets"], list):
+        existing_ids = {p.get("id") for p in migrated["presets"] if isinstance(p, dict)}
+        for dp in DEFAULT_PRESETS:
+            if dp.id not in existing_ids:
+                migrated["presets"].append(dp.model_dump())
+                changed = True
 
     if migrated.get("app_version") != __version__:
         migrated["app_version"] = __version__

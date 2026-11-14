@@ -97,3 +97,4 @@ def test_camera_manager_discovery_and_lens_config(app_settings: AppSettings) -> 
     caps = mgr.get_capabilities(usb_cam)
     assert caps.lens_info["focal_length_mm"] == 3.6
     assert caps.rolling_shutter_warning is not None
+

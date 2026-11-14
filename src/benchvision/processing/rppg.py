@@ -12,8 +12,14 @@ from benchvision.processing.base import (
     MagnificationMethod,
     MagnificationOutput,
     ProgressCallback,
+    alloc_motion_energy,
+    shrink_energy,
 )
-from benchvision.processing.filters import apply_temporal_bandpass, find_dominant_frequency
+from benchvision.processing.filters import (
+    apply_temporal_bandpass,
+    find_dominant_frequency,
+    normalize_motion_energy_inplace,
+)
 
 
 @PROCESSING_REGISTRY.register("rppg")
@@ -73,11 +79,11 @@ class RppgColorPulseMethod(MagnificationMethod):
             raise JobCancelledError("Cancelled after rPPG bandpass")
 
         out_frames = np.empty_like(frames_bgr)
-        motion_energy = np.zeros((n_frames, h, w), dtype=np.float32)
+        motion_energy = alloc_motion_energy(n_frames, h, w)
 
         for t in range(n_frames):
             up_pulse = cv2.resize(bp_pulse[t], (w, h), interpolation=cv2.INTER_LINEAR)
-            motion_energy[t] = np.abs(up_pulse)
+            motion_energy[t] = shrink_energy(np.abs(up_pulse), motion_energy)
 
             # Amplify green & red channels to make subtle pulse visually prominent
             frame_f = frames_bgr[t].astype(np.float32)
@@ -86,15 +92,15 @@ class RppgColorPulseMethod(MagnificationMethod):
             frame_f[..., 2] = frame_f[..., 2] + 0.65 * gain_map
             out_frames[t] = np.clip(frame_f, 0, 255).astype(np.uint8)
 
-        max_e = float(np.percentile(motion_energy, 99.5)) if np.any(motion_energy > 0) else 1.0
-        if max_e > 1e-6:
-            motion_energy = np.clip(motion_energy / max_e, 0.0, 1.0)
+        normalize_motion_energy_inplace(motion_energy)
 
         # ROI signal from central region
         roi_slice = small_bgr[
             :, small_h // 4 : 3 * small_h // 4, small_w // 4 : 3 * small_w // 4, 1
         ]
         raw_sig = np.mean(roi_slice, axis=(1, 2)).astype(np.float64)
+        if n_frames > 4:
+            raw_sig[:4] = raw_sig[4]
         filtered_sig = apply_temporal_bandpass(
             raw_sig,
             fps=fps,
@@ -125,3 +131,4 @@ class RppgColorPulseMethod(MagnificationMethod):
                 "estimated_heart_rate_bpm": dom_bpm,
             },
         )
+

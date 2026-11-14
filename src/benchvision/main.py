@@ -100,9 +100,19 @@ def create_app(
     static_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    @app.middleware("http")
+    async def disable_static_cache(request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+
     @app.get("/")
     def serve_spa_index() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
+        return FileResponse(
+            static_dir / "index.html",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
 
     return app
 
@@ -170,3 +180,4 @@ def cli_main() -> None:
 
 if __name__ == "__main__":
     cli_main()
+

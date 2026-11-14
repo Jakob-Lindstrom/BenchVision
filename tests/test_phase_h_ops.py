@@ -42,3 +42,4 @@ def test_ci_workflows_and_readme_present() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "scripts/install.sh" in readme
     assert "http://" in readme
+

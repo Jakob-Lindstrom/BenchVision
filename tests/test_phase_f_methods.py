@@ -17,7 +17,16 @@ from benchvision.storage.layout import DataLayout
 
 @pytest.mark.parametrize(
     "method_key",
-    ["eulerian", "riesz", "phase_steerable", "optical_flow", "rppg"],
+    [
+        "eulerian",
+        "riesz",
+        "phase_steerable",
+        "motion_extraction",
+        "posy_rgb_trail",
+        "posy_peak_hold",
+        "optical_flow",
+        "rppg",
+    ],
 )
 def test_all_magnification_methods_recover_synthetic_frequency(method_key: str) -> None:
     target_hz = 2.4  # 144 BPM
@@ -51,7 +60,7 @@ def test_all_magnification_methods_recover_synthetic_frequency(method_key: str) 
     out = cls().process(frames_bgr=frames, timestamps_s=timestamps_s, fps=fps, params=params)
 
     assert out.magnified_bgr.shape == frames.shape
-    assert out.motion_energy.shape == (n_frames, 60, 80)
+    assert out.motion_energy.shape == (n_frames, 30, 40)  # half-resolution to save RAM
     assert pytest.approx(out.dominant_hz, abs=0.2) == target_hz
     assert pytest.approx(out.dominant_bpm, abs=12.0) == target_hz * 60.0
 
@@ -60,7 +69,7 @@ def test_method_comparison_on_same_clip(
     app_settings: AppSettings, data_layout: DataLayout
 ) -> None:
     methods = list_processing_methods()
-    assert len(methods) == 5
+    assert len(methods) == 8
 
     db = Database(data_layout.db_path)
     cam_mgr = CameraManager(app_settings, realtime_synthetic=False)
@@ -81,3 +90,4 @@ def test_method_comparison_on_same_clip(
     assert comp["frequency_spread_hz"] <= 0.25
     for item in comp["comparisons"]:
         assert pytest.approx(item["dominant_hz"], abs=0.25) == 2.0
+

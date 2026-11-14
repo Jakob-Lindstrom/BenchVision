@@ -27,9 +27,20 @@ class JobParams(BaseModel):
     max_width: int | None = Field(default=640, ge=64, le=3840)
     filter_type: str = Field(default="butterworth", pattern="^(ideal|butterworth|iir)$")
     output_mode: str = Field(
-        default="side_by_side", pattern="^(side_by_side|magnified|heatmap)$"
+        default="side_by_side",
+        pattern="^(side_by_side|magnified|heatmap|phase_ripple|quiver_vectors|dual_sync)$",
+    )
+    target_stream: str = Field(
+        default="both",
+        pattern="^(both|cam_a|cam_b)$",
     )
     chrom_attenuation: float = Field(default=0.2, ge=0.0, le=1.0)
+    heatmap_threshold: float = Field(default=0.20, ge=0.0, le=0.95)
+    gate_background_noise: bool = False
+    stabilize_subpixel: bool = False
+    roi_b: tuple[int, int, int, int] | None = None
+    trim_start_s: float = Field(default=0.0, ge=0.0, le=600.0)
+    trim_end_s: float = Field(default=0.0, ge=0.0, le=600.0)
 
 
 @dataclass
@@ -37,7 +48,7 @@ class MagnificationOutput:
     """Standardized output produced by any MagnificationMethod plugin."""
 
     magnified_bgr: np.ndarray  # (T, H, W, 3) uint8
-    motion_energy: np.ndarray  # (T, H, W) float32 in [0, 1]
+    motion_energy: np.ndarray  # (T, H/2, W/2) float32 in [0, 1] (see alloc_motion_energy)
     raw_roi_signal: np.ndarray  # (T,) float64
     filtered_roi_signal: np.ndarray  # (T,) float64
     timestamps_s: np.ndarray  # (T,) float64
@@ -48,6 +59,31 @@ class MagnificationOutput:
 
 
 ProgressCallback = Callable[[float], bool]  # returns False if job is cancelled
+
+
+MOTION_ENERGY_SCALE = 2  # motion energy is stored at 1/2 resolution (1/4 RAM)
+
+
+def alloc_motion_energy(n_frames: int, h: int, w: int) -> np.ndarray:
+    """Allocate a half-resolution (T, H/2, W/2) float32 motion-energy buffer.
+
+    Storing motion energy at full resolution costs 4 bytes/pixel/frame (e.g. 340 MB for a
+    12 s 640x385 clip), which was enough to trigger the Linux OOM killer on a 2 GB Pi 4.
+    """
+    mh = max(1, (h + MOTION_ENERGY_SCALE - 1) // MOTION_ENERGY_SCALE)
+    mw = max(1, (w + MOTION_ENERGY_SCALE - 1) // MOTION_ENERGY_SCALE)
+    return np.zeros((n_frames, mh, mw), dtype=np.float32)
+
+
+def shrink_energy(energy_full: np.ndarray, buffer: np.ndarray) -> np.ndarray:
+    """Downsample a full-resolution (H, W) energy map to match a motion-energy buffer."""
+    import cv2
+
+    mh, mw = buffer.shape[1:3]
+    src = np.asarray(energy_full, dtype=np.float32)
+    if src.shape[:2] == (mh, mw):
+        return src
+    return cv2.resize(src, (mw, mh), interpolation=cv2.INTER_AREA)
 
 
 class JobCancelledError(RuntimeError):
@@ -77,17 +113,24 @@ class MagnificationMethod(ABC):
 def estimate_processing_time_s(
     frame_count: int, width: int, height: int, method: str = "eulerian"
 ) -> float:
-    """Realistic estimate of offline processing time (in seconds) on a Raspberry Pi 4/5."""
+    """Realistic estimate of offline processing time (in seconds) adapted to Pi 4 vs Pi 5."""
+    from benchvision.core.hardware import detect_hardware_profile
+
+    hw = detect_hardware_profile()
     megapixels_total = (frame_count * width * height) / 1_000_000.0
     cost_per_mp = {
         "eulerian": 0.45,
-        "riesz": 0.65,
-        "phase_steerable": 1.40,
+        "riesz": 0.55,
+        "phase_steerable": 1.35,
+        "motion_extraction": 0.20,
+        "posy_rgb_trail": 0.22,
+        "posy_peak_hold": 0.24,
         "optical_flow": 0.85,
         "rppg": 0.25,
     }
-    factor = cost_per_mp.get(method, 0.65)
+    factor = cost_per_mp.get(method, 0.55) / max(float(hw["speed_multiplier"]), 0.5)
     return round(max(1.0, megapixels_total * factor), 1)
 
 
 PROCESSING_REGISTRY: PluginRegistry[MagnificationMethod] = PluginRegistry("processing")
+

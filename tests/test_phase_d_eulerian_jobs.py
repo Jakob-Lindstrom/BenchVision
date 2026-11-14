@@ -85,3 +85,4 @@ def test_eulerian_magnification_and_job_queue(
     cancelled = job_mgr.cancel_job(queued_job["job_id"])
     assert cancelled is not None
     assert cancelled["status"] == "cancelled"
+

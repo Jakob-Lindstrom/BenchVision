@@ -88,3 +88,4 @@ def test_camera_registry_and_synthetic_oscillation(synthetic_cam: SyntheticCamer
     spectrum = np.abs(np.fft.rfft(sig))
     peak_hz = float(freqs[int(np.argmax(spectrum[1:])) + 1])
     assert pytest.approx(peak_hz, abs=0.2) == 2.0
+

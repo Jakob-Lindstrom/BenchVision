@@ -4,7 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BenchVision — Raspberry Pi Motion &amp; Video Magnification</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <style>
+    .dual-cam-only { display: none !important; }
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -12,14 +15,17 @@
       <span class="brand-dot"></span>
       <span>BenchVision</span>
       <span id="active-camera-badge" class="badge">Detecting Camera...</span>
+      <span id="dual-cam-topbar-badge" class="badge global dual-cam-only" title="Synchronized Dual-Camera Mode Active">DUAL CAM: A+B</span>
+      <span id="hw-model-badge" class="badge" title="Detected Raspberry Pi model and total system RAM">Pi Hardware</span>
+      <span id="thermal-badge" class="badge global" title="Raspberry Pi CPU temperature and thermal throttling telemetry">CPU —&deg;C</span>
     </div>
     <nav class="nav-tabs" aria-label="Main Navigation">
-      <button class="nav-tab active" data-page="record" onclick="switchPage('record')">1. Record</button>
-      <button class="nav-tab" data-page="library" onclick="switchPage('library')">2. Library</button>
-      <button class="nav-tab" data-page="process" onclick="switchPage('process')">3. Process &amp; Compare</button>
-      <button class="nav-tab" data-page="analysis" onclick="switchPage('analysis')">4. Analysis</button>
-      <button class="nav-tab" data-page="system" onclick="switchPage('system')">5. System</button>
-      <button onclick="openSetupModal()">Camera Setup</button>
+      <button class="nav-tab active" data-page="record" onclick="switchPage('record')" title="Aim camera, lock exposure/WB, and record a lossless clip">1. Record</button>
+      <button class="nav-tab" data-page="library" onclick="switchPage('library')" title="Browse, download, or delete recorded clips">2. Library</button>
+      <button class="nav-tab" data-page="process" onclick="switchPage('process')" title="Run offline video magnification methods and compare results side by side">3. Process &amp; Compare</button>
+      <button class="nav-tab" data-page="analysis" onclick="switchPage('analysis')" title="Inspect FFT spectrum, Welch PSD, spectrogram, BPM, and export CSV">4. Analysis</button>
+      <button class="nav-tab" data-page="system" onclick="switchPage('system')" title="Check Raspberry Pi hardware, disk space, updates, and logs">5. System</button>
+      <button onclick="openSetupModal()" title="Switch active camera or configure lens focal length &amp; FOV">Camera Setup</button>
     </nav>
   </header>
 
@@ -31,18 +37,74 @@
         <div>
           <div class="card">
             <div class="card-header">
-              <span class="card-title">Live Aiming &amp; Focus Preview</span>
-              <div style="display: flex; gap: 0.5rem;">
-                <a class="btn" href="/api/cameras/preview.jpg" download="snapshot.jpg">Snapshot</a>
-                <button onclick="togglePreviewFullscreen()">Fullscreen</button>
+              <span class="card-title">
+                Live Aiming &amp; Focus Preview
+                <span class="tip" tabindex="0" data-tip="Switch between Normal Camera View, Posy Motion Extraction, RGB Chrono-Chromatic Rainbow Trails, Motion Persistence Peak-Hold, Tare/Zero Reference Lock, and Digital Stroboscope!">?</span>
+              </span>
+              <div style="display: flex; gap: 0.45rem; align-items: center; flex-wrap: wrap;">
+                <div id="dual-preview-switcher" class="dual-cam-only" style="display: inline-flex; gap: 0.25rem; align-items: center;">
+                  <button type="button" id="btn-camview-a" class="primary" style="padding: 0.25rem 0.55rem; font-size: 0.75rem;" onclick="setDualPreviewView('a')" title="Aim and draw ROI on Primary Camera A">Cam A</button>
+                  <button type="button" id="btn-camview-b" style="padding: 0.25rem 0.55rem; font-size: 0.75rem;" onclick="setDualPreviewView('b')" title="Aim and draw ROI on Secondary Camera B">Cam B</button>
+                  <button type="button" id="btn-camview-sbs" style="padding: 0.25rem 0.55rem; font-size: 0.75rem;" onclick="setDualPreviewView('sbs')" title="View Cam A and Cam B side-by-side">Side-by-Side</button>
+                </div>
+                <a class="btn" href="/api/cameras/preview.jpg" download="snapshot.jpg" title="Save a still JPEG image from the live preview">Snapshot</a>
+                <button onclick="togglePreviewFullscreen()" title="Expand the live camera preview to full screen">Fullscreen</button>
               </div>
             </div>
-            <div class="video-box" id="preview-box">
-              <img id="live-preview-img" src="/api/cameras/preview.mjpg" alt="Live Camera Preview" />
+            <div class="video-box" id="preview-box" style="position: relative; display: block; width: 100%; aspect-ratio: auto; line-height: 0; overflow: hidden;">
+              <img id="live-preview-img" src="/api/cameras/preview.mjpg" alt="Live Camera Preview" draggable="false" style="display: block; width: 100%; height: auto;" />
+              <div id="roi-drag-box" class="roi-drag-box" style="display: none; position: absolute; top: 0; left: 0; pointer-events: none; box-sizing: border-box; border: 2px solid #38bdf8; background: rgba(56, 189, 248, 0.18); z-index: 20;">
+                <span id="roi-drag-label" class="roi-drag-label" style="position: absolute; top: 4px; left: 4px; background: rgba(2, 6, 23, 0.9); color: #38bdf8; font-size: 0.72rem; font-weight: 600; padding: 2px 6px; border-radius: 4px; line-height: 1.3; white-space: nowrap;"></span>
+              </div>
+              <svg id="ruler-overlay-svg" style="display: none; position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 22;"></svg>
+            </div>
+            <div class="player-toolbar">
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <select id="live-preview-mode" onchange="updateLivePreviewMode()" title="Switch live preview between normal video, Posy modes, and Stroboscope">
+                  <option value="normal">Live View: Normal Camera</option>
+                  <option value="posy_2_1">Posy Motion Extraction (2-Frame Shift, 1x)</option>
+                  <option value="posy_3_3">Posy Motion Extraction (3-Frame Shift, 3x Gain)</option>
+                  <option value="posy_6_6">Posy Motion Extraction (6-Frame Shift, 6x Micro)</option>
+                  <option value="posy_rgb_trail">Posy RGB Chrono-Chromatic Trail (Rainbow)</option>
+                  <option value="posy_peak_hold">Posy Motion Persistence (Peak-Hold Glow)</option>
+                  <option value="stroboscope">Digital Stroboscope (Alias Freeze)</option>
+                </select>
+                <select id="live-preview-assist" onchange="updateLivePreviewMode()" title="Optical focus peaking (green edges) for C/CS lenses or overexposure zebra warning stripes (>250)">
+                  <option value="off">Assist: Off</option>
+                  <option value="focus_peaking">Focus Peaking (Green Edges)</option>
+                  <option value="zebras">Overexposure Zebras (&gt;250)</option>
+                </select>
+                <button type="button" id="btn-tare-frame" onclick="toggleTareReferenceFrame()" title="Lock current frame as static 50% gray reference to observe sag, drift, or static deflection">
+                  Tare / Zero Frame
+                </button>
+                <button type="button" id="btn-ruler-mode" onclick="toggleRulerCalibrationMode()" title="Click two points across an object of known length on the live preview to calibrate exact mm/pixel scale">
+                  2-Point Ruler
+                </button>
+                <label style="display: inline-flex; align-items: center; gap: 0.25rem; margin: 0; font-size: 0.76rem;">
+                  Strobe Hz:
+                  <input id="live-strobe-hz" type="number" step="0.5" min="0" max="60" value="0" style="width: 64px;" onchange="updateLivePreviewMode()" title="Set > 0 to sample frames at a strobe alias frequency" />
+                </label>
+              </div>
+              <span id="live-scale-badge" class="badge" title="Active physical scale factor (mm/pixel) from 2-Point Ruler or Lens FOV">Scale: — mm/px</span>
+            </div>
+            <div id="ruler-calib-bar" class="player-toolbar" style="display: none; border-color: var(--warning); background: rgba(245, 158, 11, 0.08);">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <strong style="color: #fcd34d;">2-Point Ruler Calibration:</strong>
+                <span id="ruler-px-readout" class="badge rolling">Click 2 points on video (0.0 px)</span>
+                <label style="display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; font-size: 0.78rem; color: var(--text-main);">
+                  Known Length (mm):
+                  <input id="ruler-known-mm" type="number" step="0.5" min="0.1" max="10000" value="50" style="width: 78px;" />
+                </label>
+                <button type="button" class="primary" onclick="applyRulerCalibration()">Lock mm/px Scale</button>
+                <button type="button" onclick="clearRulerCalibration()" title="Clear 2-point ruler override and revert to optical lens FOV model">Reset to Lens FOV</button>
+              </div>
             </div>
             <div style="margin-top: 0.9rem;">
               <div class="card-header" style="margin-bottom: 0.4rem;">
-                <span style="font-size: 0.85rem; color: var(--text-muted);">Live ROI Mean Intensity Signal (Non-Blocking)</span>
+                <span style="font-size: 0.85rem; color: var(--text-muted);">
+                  Live ROI Mean Intensity Signal (Non-Blocking)
+                  <span class="tip" tabindex="0" data-tip="Shows real-time average brightness changes inside your selected Region of Interest (or center of frame). Useful for checking if lighting is steady before recording.">?</span>
+                </span>
               </div>
               <canvas id="live-roi-canvas" class="plot-canvas" style="height: 110px;"></canvas>
             </div>
@@ -55,7 +117,7 @@
             <ul style="padding-left: 1.2rem; font-size: 0.86rem; color: var(--text-muted); line-height: 1.7;">
               <li><strong>Rigid Tripod / Mount:</strong> Camera shake is amplified alongside target motion. Clamp the Pi or webcam firmly.</li>
               <li><strong>Lighting Flicker (50/60 Hz):</strong> Use DC LED or natural daylight. Mains AC lighting flicker aliases into low-Hz bands.</li>
-              <li><strong>Lock Exposure &amp; Gain:</strong> Always click <em>"1. Lock Camera Settings"</em> before recording so auto-exposure never shifts mid-clip.</li>
+              <li><strong>Why Lock Settings?</strong> Normally a webcam auto-adjusts brightness and white balance continuously. Locking freezes those values so the camera doesn't shift brightness mid-recording and create fake pulse/motion artifacts.</li>
               <li><strong>Rolling vs. Global Shutter:</strong> Rolling-shutter webcams work well for pulse/breathing (&lt;5 Hz); use the Raspberry Pi Global Shutter Camera (IMX296) for high-frequency mechanical vibrations.</li>
             </ul>
           </div>
@@ -64,60 +126,130 @@
         <div>
           <div class="card">
             <div class="card-header">
-              <span class="card-title">Step 1: Lock Exposure, Gain, WB &amp; ROI</span>
-              <span id="lock-status-badge" class="badge">Unlocked</span>
+              <span class="card-title">
+                Step 1: Camera Controls &amp; ROI
+                <span class="tip" tabindex="0" data-tip="Use 'Unlock (Auto-Adjust)' while aiming so the camera adapts to lighting automatically. Click 'Lock Settings' right before recording so brightness and color stay frozen during capture.">?</span>
+              </span>
+              <span id="lock-status-badge" class="badge">Auto-Adjust (Unlocked)</span>
             </div>
             <div class="form-row">
               <div>
-                <label for="rec-width">Width (px)</label>
-                <input id="rec-width" type="number" value="640" onchange="runPreflight()" />
+                <label for="rec-res-preset">
+                  Resolution Preset
+                  <span class="tip" tabindex="0" data-tip="Quickly select from your camera's supported resolutions (4:3, 16:9, Global Shutter, HQ, etc.) or enter custom Width &amp; Height.">?</span>
+                </label>
+                <select id="rec-res-preset" onchange="onSelectResolutionPreset()">
+                  <option value="640x480">640 &times; 480 (4:3 Fast)</option>
+                  <option value="1280x720">1280 &times; 720 (16:9 HD)</option>
+                  <option value="1456x1088">1456 &times; 1088 (Global Shutter)</option>
+                  <option value="1920x1080">1920 &times; 1080 (16:9 Full HD)</option>
+                </select>
               </div>
               <div>
-                <label for="rec-height">Height (px)</label>
-                <input id="rec-height" type="number" value="480" onchange="runPreflight()" />
+                <label for="rec-width">
+                  Width (px)
+                  <span class="tip" tabindex="0" data-tip="Horizontal capture resolution in pixels (e.g. 640, 1280, 1456, 1920). ROI coordinates scale automatically when you change resolution.">?</span>
+                </label>
+                <input id="rec-width" type="number" value="640" onchange="onResolutionDimensionChange()" />
               </div>
               <div>
-                <label for="rec-fps">Target FPS</label>
-                <input id="rec-fps" type="number" value="30" onchange="runPreflight()" />
+                <label for="rec-height">
+                  Height (px)
+                  <span class="tip" tabindex="0" data-tip="Vertical capture resolution in pixels (e.g. 480, 720, 1088, 1080).">?</span>
+                </label>
+                <input id="rec-height" type="number" value="480" onchange="onResolutionDimensionChange()" />
+              </div>
+              <div>
+                <label for="rec-fps">
+                  Target FPS
+                  <span class="tip" tabindex="0" data-tip="Frames captured per second. Must be at least 2x the highest oscillation frequency you want to detect (Nyquist criterion).">?</span>
+                </label>
+                <input id="rec-fps" type="number" value="30" onchange="onTargetFpsChange()" />
               </div>
             </div>
             <div class="form-row">
               <div>
-                <label for="ctrl-exposure">Exposure (&mu;s)</label>
+                <label for="ctrl-exposure">
+                  Exposure (&mu;s)
+                  <span class="tip" tabindex="0" data-tip="Shutter open time per frame in microseconds (10000 us = 10 ms = 1/100s). Shorter exposure freezes fast vibrations cleanly but needs brighter lighting. Automatically clamped below 1/FPS.">?</span>
+                </label>
                 <input id="ctrl-exposure" type="number" value="10000" step="500" />
               </div>
               <div>
-                <label for="ctrl-gain">Gain</label>
+                <label for="ctrl-gain">
+                  Gain
+                  <span class="tip" tabindex="0" data-tip="Sensor brightness amplification. Increase if the image is dark after locking exposure, but keep low to minimize sensor grain.">?</span>
+                </label>
                 <input id="ctrl-gain" type="number" value="1.0" step="0.5" />
               </div>
               <div>
-                <label for="ctrl-wb">White Balance (K)</label>
+                <label for="ctrl-wb">
+                  White Balance (K)
+                  <span class="tip" tabindex="0" data-tip="Color temperature in Kelvin (2800K warm indoor bulb, 4600K neutral indoor, 6500K daylight). Locking prevents color drift during pulse/rPPG analysis.">?</span>
+                </label>
                 <input id="ctrl-wb" type="number" value="4600" step="100" />
               </div>
               <div>
-                <label for="ctrl-focus">Focus Position</label>
+                <label for="ctrl-focus">
+                  Focus Position
+                  <span class="tip" tabindex="0" data-tip="Manual lens focus position for motorized cameras (e.g. Pi Camera Module 3). Fixed-focus webcams like the Logitech C270 ignore this.">?</span>
+                </label>
                 <input id="ctrl-focus" type="number" value="0.0" step="0.5" />
               </div>
             </div>
-            <div class="form-row">
-              <div>
-                <label for="roi-x">ROI X (optional)</label>
-                <input id="roi-x" type="number" placeholder="0" onchange="runPreflight()" />
-              </div>
-              <div>
-                <label for="roi-y">ROI Y</label>
-                <input id="roi-y" type="number" placeholder="0" onchange="runPreflight()" />
-              </div>
-              <div>
-                <label for="roi-w">ROI Width</label>
-                <input id="roi-w" type="number" placeholder="Full" onchange="runPreflight()" />
-              </div>
-              <div>
-                <label for="roi-h">ROI Height</label>
-                <input id="roi-h" type="number" placeholder="Full" onchange="runPreflight()" />
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.75rem;">
+              <span id="active-roi-badge" class="badge">ROI: Full Frame (640x480)</span>
+              <div style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
+                <label style="display: inline-flex; align-items: center; gap: 0.35rem; margin: 0; cursor: pointer; font-size: 0.8rem;">
+                  <input id="roi-crop-preview" type="checkbox" style="width: auto;" onchange="runPreflight()" />
+                  Zoom Preview to ROI Crop
+                </label>
+                <button type="button" style="padding: 0.3rem 0.65rem; font-size: 0.78rem;" onclick="clearRoiInputs()" title="Reset ROI inputs and capture the full camera frame">
+                  Clear ROI (Full Frame)
+                </button>
               </div>
             </div>
-            <button style="width: 100%;" onclick="lockCameraControls()">1. Lock Camera Settings (Disable Auto-Adjust)</button>
+            <details class="adv-drawer">
+              <summary>Fine ROI Coordinates (Drag on Video or Edit Pixels)</summary>
+              <div class="form-row" style="margin-bottom: 0;">
+                <div>
+                  <label for="roi-x">
+                    ROI X (optional)
+                    <span class="tip" tabindex="0" data-tip="Left starting pixel coordinate (0 = left edge) for cropping a Region of Interest. You can also click and drag a box directly on the Live Preview video!">?</span>
+                  </label>
+                  <input id="roi-x" type="number" placeholder="0" oninput="runPreflight()" onchange="runPreflight()" />
+                </div>
+                <div>
+                  <label for="roi-y">
+                    ROI Y
+                    <span class="tip" tabindex="0" data-tip="Top starting pixel coordinate (0 = top edge) for cropping a Region of Interest.">?</span>
+                  </label>
+                  <input id="roi-y" type="number" placeholder="0" oninput="runPreflight()" onchange="runPreflight()" />
+                </div>
+                <div>
+                  <label for="roi-w">
+                    ROI Width
+                    <span class="tip" tabindex="0" data-tip="Width in pixels of the cropped Region of Interest box (highlighted in cyan on the preview). Leave blank to use the remaining width from ROI X to the right edge.">?</span>
+                  </label>
+                  <input id="roi-w" type="number" placeholder="Full" oninput="runPreflight()" onchange="runPreflight()" />
+                </div>
+                <div>
+                  <label for="roi-h">
+                    ROI Height
+                    <span class="tip" tabindex="0" data-tip="Height in pixels of the cropped Region of Interest box. Leave blank to use the remaining height from ROI Y to the bottom edge.">?</span>
+                  </label>
+                  <input id="roi-h" type="number" placeholder="Full" oninput="runPreflight()" onchange="runPreflight()" />
+                </div>
+              </div>
+            </details>
+            <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
+              <button style="flex: 1.4;" onclick="lockCameraControls()" title="Disable auto-exposure and auto-white-balance and lock the manual values above">
+                Lock Settings (Disable Auto-Adjust)
+              </button>
+              <button style="flex: 1;" onclick="unlockCameraControls()" title="Turn automatic exposure, white balance, and autofocus back ON for aiming">
+                Unlock (Enable Auto-Adjust)
+              </button>
+            </div>
           </div>
 
           <div class="card">
@@ -126,21 +258,33 @@
             </div>
             <div class="form-row">
               <div>
-                <label for="rec-title">Clip Title</label>
-                <input id="rec-title" type="text" value="Resting Pulse Capture" />
+                <label for="rec-title">
+                  Clip Title
+                  <span class="tip" tabindex="0" data-tip="Human-readable name for this recording in your Library. Defaults to a timestamped clip name unless you type a custom name.">?</span>
+                </label>
+                <input id="rec-title" type="text" value="clip-auto" oninput="state.userEditedTitle = true" />
               </div>
               <div>
-                <label for="rec-duration">Duration (seconds)</label>
-                <input id="rec-duration" type="number" value="6" min="2" max="120" onchange="runPreflight()" />
+                <label for="rec-duration">
+                  Duration (seconds)
+                  <span class="tip" tabindex="0" data-tip="Length of recording in seconds. Longer clips give finer frequency resolution (df = 1 / duration). 8-10s is great for pulse and mechanical vibration; 15s+ for slow breathing.">?</span>
+                </label>
+                <input id="rec-duration" type="number" value="8" min="2" max="120" onchange="runPreflight()" />
               </div>
             </div>
             <div class="form-row">
               <div>
-                <label for="rec-max-hz">Highest Target Freq (Hz)</label>
-                <input id="rec-max-hz" type="number" value="3.5" step="0.5" onchange="runPreflight()" />
+                <label for="rec-max-hz">
+                  Highest Target Freq (Hz)
+                  <span class="tip" tabindex="0" data-tip="The highest frequency (1 Hz = 60 BPM) you plan to analyze. Defaults to FPS / 3 and is checked against camera FPS to ensure FPS >= 2x Max Freq (Nyquist limit).">?</span>
+                </label>
+                <input id="rec-max-hz" type="number" value="10.0" step="0.5" oninput="state.userEditedMaxHz = true" onchange="runPreflight()" />
               </div>
               <div>
-                <label for="rec-format">Lossless Storage Format</label>
+                <label for="rec-format">
+                  Lossless Storage Format
+                  <span class="tip" tabindex="0" data-tip="Standard H.264 compression erases subtle motion. These lossless/near-lossless formats preserve raw pixel fidelity for offline magnification.">?</span>
+                </label>
                 <select id="rec-format" onchange="runPreflight()">
                   <option value="mjpeg_q100">Q100 MJPEG + Lossless Frame Store</option>
                   <option value="ffv1_mkv">Lossless FFV1 / Archive</option>
@@ -149,9 +293,42 @@
               </div>
             </div>
 
+            <details class="adv-drawer">
+              <summary>Auto-Trigger on ROI Spike (Pre-Roll Circular Buffer)</summary>
+              <div class="form-row">
+                <div>
+                  <label for="trig-sigma">
+                    Spike Threshold (&sigma;)
+                    <span class="tip" tabindex="0" data-tip="Number of standard deviations above the rolling ROI baseline required to fire the trigger (default 3.5 sigma).">?</span>
+                  </label>
+                  <input id="trig-sigma" type="number" step="0.5" min="1.5" max="25" value="3.5" />
+                </div>
+                <div>
+                  <label for="trig-pct">
+                    Min Intensity Jump (%)
+                    <span class="tip" tabindex="0" data-tip="Minimum percentage change in ROI brightness/motion required to trigger capture, preventing false triggers on flat sensor noise.">?</span>
+                  </label>
+                  <input id="trig-pct" type="number" step="0.5" min="0.2" max="50" value="1.5" />
+                </div>
+                <div>
+                  <label for="trig-preroll-s">
+                    Pre-Roll Buffer (s)
+                    <span class="tip" tabindex="0" data-tip="Seconds of circular RAM buffer prepended before the trigger spike so transient impacts or machine startups are captured from before the event.">?</span>
+                  </label>
+                  <input id="trig-preroll-s" type="number" step="0.5" min="0.5" max="2.5" value="2.0" />
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap;">
+                <button type="button" id="btn-arm-trigger" onclick="toggleMotionTrigger()" title="Arm automatic recording when the live ROI signal spikes above threshold">
+                  Arm Motion Trigger
+                </button>
+                <span id="trig-status-badge" class="badge">Disarmed (2.0s Pre-Roll Ready)</span>
+              </div>
+            </details>
+
             <div id="preflight-banner" class="banner">Checking Nyquist &amp; disk space...</div>
 
-            <button id="btn-record" class="primary" style="width: 100%; padding: 0.75rem;" onclick="startRecording()">
+            <button id="btn-record" class="primary" style="width: 100%; padding: 0.75rem;" onclick="startRecording()" title="Automatically locks camera settings, captures frames with nanosecond timestamps, and saves losslessly">
               2. Record Lossless Clip
             </button>
             <div id="record-result-banner" class="banner success" style="display: none; margin-top: 0.85rem;"></div>
@@ -165,7 +342,45 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Recorded Clips Library (Unmodified Raw Sources)</span>
-          <button onclick="loadLibrary()">Refresh Library</button>
+          <div style="display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap;">
+            <button type="button" id="btn-generate-demos" onclick="generateDemoShowcaseClips()" title="Synthesize two realistic 6-second raw reference clips (Dual-Mode Cantilever Seesaw &amp; Sub-Pixel Micro-Pulse) for immediate testing without hardware setup">
+              &#9889; Generate Demo Showcase Clips
+            </button>
+            <button type="button" class="primary" onclick="toggleUploadDrawer()" title="Upload an external video (.mp4, .mov, .avi, .mkv) such as a high-speed smartphone slow-mo clip">
+              + Upload External Clip (.mp4 / .mov / .avi / .mkv)
+            </button>
+            <button onclick="loadLibrary()">Refresh Library</button>
+          </div>
+        </div>
+        <div id="upload-clip-drawer" class="adv-drawer" style="display: none; padding: 1rem; margin-bottom: 1rem; background: var(--bg-main); border: 1px dashed var(--accent); border-radius: 0.6rem;">
+          <div class="form-row">
+            <div>
+              <label for="upload-video-file">
+                Video File (.mp4 / .mov / .avi / .mkv)
+                <span class="tip" tabindex="0" data-tip="Select a video file recorded on a smartphone, high-speed camera, or external recorder.">?</span>
+              </label>
+              <input id="upload-video-file" type="file" accept=".mp4,.mov,.avi,.mkv,.webm,.m4v,video/*" />
+            </div>
+            <div>
+              <label for="upload-clip-title">
+                Clip Title (optional)
+                <span class="tip" tabindex="0" data-tip="Custom title for this imported clip in your Library. Defaults to the uploaded filename.">?</span>
+              </label>
+              <input id="upload-clip-title" type="text" placeholder="Auto from filename" />
+            </div>
+            <div>
+              <label for="upload-true-fps">
+                True Capture FPS Override (optional)
+                <span class="tip" tabindex="0" data-tip="High-speed smartphone clips (e.g. 120 or 240 FPS slow-mo) are saved in containers tagged at 30 FPS playback. Enter the true capture FPS (e.g. 240) so FFT, Welch PSD, BPM, and Nyquist reflect real physical frequencies!">?</span>
+              </label>
+              <input id="upload-true-fps" type="number" step="1" min="1" max="5000" placeholder="e.g. 120, 240, 480 (blank = container FPS)" />
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
+            <button type="button" id="btn-do-upload" class="primary" onclick="uploadExternalClip()">Import &amp; Register Clip</button>
+            <button type="button" onclick="toggleUploadDrawer()">Cancel</button>
+            <span id="upload-status-text" style="font-size: 0.82rem; color: var(--text-muted);"></span>
+          </div>
         </div>
         <div id="library-grid" class="grid-3"></div>
       </div>
@@ -181,21 +396,44 @@
             </div>
             <div class="form-row">
               <div>
-                <label for="proc-clip">Source Clip</label>
+                <label for="proc-clip">
+                  Source Clip
+                  <span class="tip" tabindex="0" data-tip="Select which raw recording from your Library to process. Re-processing never modifies the original recording.">?</span>
+                </label>
                 <select id="proc-clip" onchange="onSelectProcessClip()"></select>
               </div>
+              <div id="proc-target-stream-wrap" class="dual-cam-only">
+                <label for="proc-target-stream">
+                  Target Stream (Dual-Cam)
+                  <span class="tip" tabindex="0" data-tip="Both A + B Sync magnifies both camera streams and computes Cross-Camera Phase Shift &amp; 3D (X,Y,Z) Orbit. Or process Cam A / Cam B individually.">?</span>
+                </label>
+                <select id="proc-target-stream" onchange="updateJobTimeEstimate()">
+                  <option value="both" selected>Both A + B Sync</option>
+                  <option value="cam_a">Cam A Only</option>
+                  <option value="cam_b">Cam B Only</option>
+                </select>
+              </div>
               <div>
-                <label for="proc-method">Magnification Method Plugin</label>
+                <label for="proc-method">
+                  Magnification Method Plugin
+                  <span class="tip" tabindex="0" data-tip="Riesz Pyramid: fast phase-based motion magnification. Linear Eulerian: amplifies subtle motion &amp; color. Motion Extraction (Posy): cancels stationary background to flat 50% gray so only movement &amp; vibration appear. Complex Steerable: 4-orientation phase magnification. Optical Flow: pixel displacement. rPPG: skin pulse.">?</span>
+                </label>
                 <select id="proc-method" onchange="updateJobTimeEstimate()"></select>
               </div>
             </div>
             <div class="form-row">
               <div>
-                <label for="proc-preset">Frequency Band Preset</label>
+                <label for="proc-preset">
+                  Frequency Band Preset
+                  <span class="tip" tabindex="0" data-tip="Quickly populates Low/High Hz cutoffs and amplification for Human Heartbeat (0.8-3 Hz), Cat Heartbeat (2-4 Hz), Breathing (0.1-0.5 Hz), Machine Vibration, or Auto-Find.">?</span>
+                </label>
                 <select id="proc-preset" onchange="applyPresetSelection()"></select>
               </div>
               <div>
-                <label for="proc-filter">Temporal Filter Type</label>
+                <label for="proc-filter">
+                  Temporal Filter Type
+                  <span class="tip" tabindex="0" data-tip="Butterworth SOS: smooth zero-phase passband (best all-around). Ideal FFT: sharp brick-wall frequency cutoff for steady periodic vibrations. Causal IIR: fastest low-memory filter.">?</span>
+                </label>
                 <select id="proc-filter">
                   <option value="butterworth">Zero-Phase Butterworth SOS</option>
                   <option value="ideal">Ideal FFT Bandpass</option>
@@ -205,36 +443,101 @@
             </div>
             <div class="form-row">
               <div>
-                <label for="proc-low-hz">Low Cutoff (Hz)</label>
+                <label for="proc-low-hz">
+                  Low Cutoff (Hz)
+                  <span class="tip" tabindex="0" data-tip="Minimum oscillation frequency to amplify in Hz (1 Hz = 60 BPM). Motions slower than this (like slow body sway) are rejected.">?</span>
+                </label>
                 <input id="proc-low-hz" type="number" step="0.1" value="0.8" />
               </div>
               <div>
-                <label for="proc-high-hz">High Cutoff (Hz)</label>
+                <label for="proc-high-hz">
+                  High Cutoff (Hz)
+                  <span class="tip" tabindex="0" data-tip="Maximum oscillation frequency to amplify in Hz (e.g. 3.0 Hz = 180 BPM). High-frequency noise above this is rejected.">?</span>
+                </label>
                 <input id="proc-high-hz" type="number" step="0.1" value="3.0" />
               </div>
               <div>
-                <label for="proc-alpha">Amplification (&alpha;)</label>
+                <label for="proc-alpha">
+                  Amplification (&alpha;)
+                  <span class="tip" tabindex="0" data-tip="Magnification multiplier (e.g. 25x). Higher values make tiny vibrations more visible, but setting too high (>60) can amplify background noise.">?</span>
+                </label>
                 <input id="proc-alpha" type="number" step="1" value="25" />
               </div>
             </div>
-            <div class="form-row">
-              <div>
-                <label for="proc-levels">Pyramid Levels</label>
-                <input id="proc-levels" type="number" min="1" max="6" value="4" />
+            <details class="adv-drawer">
+              <summary>Advanced Signal, Pyramid &amp; Clip Trimming Parameters</summary>
+              <div class="form-row">
+                <div>
+                  <label for="proc-levels">
+                    Pyramid Levels
+                    <span class="tip" tabindex="0" data-tip="Number of spatial resolution scales (default 4). More levels allow magnifying broader spatial structures.">?</span>
+                  </label>
+                  <input id="proc-levels" type="number" min="2" max="6" value="4" />
+                </div>
+                <div>
+                  <label for="proc-blur">
+                    Spatial Blur (&sigma;)
+                    <span class="tip" tabindex="0" data-tip="Gaussian spatial smoothing radius (in pixels) applied to local phase/motion maps to suppress camera grain.">?</span>
+                  </label>
+                  <input id="proc-blur" type="number" step="0.5" value="1.5" />
+                </div>
+                <div>
+                  <label for="proc-max-width">
+                    Processing Width (px)
+                    <span class="tip" tabindex="0" data-tip="Downscales frames to this width during processing. 640px is recommended on Pi 4 (2GB RAM); 1280px can be used on Pi 5 (4GB/8GB RAM).">?</span>
+                  </label>
+                  <input id="proc-max-width" type="number" value="640" onchange="updateJobTimeEstimate()" />
+                </div>
               </div>
-              <div>
-                <label for="proc-blur">Spatial Blur (&sigma;)</label>
-                <input id="proc-blur" type="number" step="0.5" value="1.5" />
+              <div class="form-row">
+                <div>
+                  <label for="proc-chroma">
+                    Chroma Attenuation (0–1)
+                    <span class="tip" tabindex="0" data-tip="0.0 suppresses color noise on mechanical edges; 0.2 is balanced; 1.0 boosts skin color variation for pulse/rPPG.">?</span>
+                  </label>
+                  <input id="proc-chroma" type="number" step="0.1" min="0" max="1" value="0.2" />
+                </div>
+                <div>
+                  <label for="proc-heat-thresh">
+                    Heatmap Noise Gate
+                    <span class="tip" tabindex="0" data-tip="Threshold (0.0 to 0.90, default 0.20) to mask out low-level camera sensor grain on the heatmap and phase-ripple map so only the primary vibration source lights up.">?</span>
+                  </label>
+                  <input id="proc-heat-thresh" type="number" step="0.05" min="0" max="0.9" value="0.20" />
+                </div>
+                <div style="display: flex; flex-direction: column; justify-content: flex-end; gap: 0.35rem; padding-bottom: 0.25rem;">
+                  <label style="display: inline-flex; align-items: center; gap: 0.45rem; cursor: pointer; margin: 0; color: var(--text-main);">
+                    <input id="proc-stabilize" type="checkbox" style="width: auto;" />
+                    Sub-Pixel Shake Stabilization
+                    <span class="tip" tabindex="0" data-tip="Cancels global camera/tripod translation shake using phase correlation before magnifying local vibrations.">?</span>
+                  </label>
+                  <label style="display: inline-flex; align-items: center; gap: 0.45rem; cursor: pointer; margin: 0; color: var(--text-main);">
+                    <input id="proc-bg-gate" type="checkbox" style="width: auto;" />
+                    Background Motion Gate (SNR Masking)
+                    <span class="tip" tabindex="0" data-tip="Uses the Heatmap Noise Gate threshold to smoothly attenuate magnification on low-energy background pixels so sensor grain stays still while the vibrating subject moves.">?</span>
+                  </label>
+                </div>
               </div>
-              <div>
-                <label for="proc-max-width">Processing Width (px)</label>
-                <input id="proc-max-width" type="number" value="640" onchange="updateJobTimeEstimate()" />
+              <div class="form-row" style="margin-bottom: 0;">
+                <div>
+                  <label for="proc-trim-start">
+                    Trim Start (s)
+                    <span class="tip" tabindex="0" data-tip="Seconds to trim from the beginning of the clip to exclude button-press or tripod settling shake without re-recording.">?</span>
+                  </label>
+                  <input id="proc-trim-start" type="number" step="0.5" min="0" max="300" value="0.0" />
+                </div>
+                <div>
+                  <label for="proc-trim-end">
+                    Trim End (s)
+                    <span class="tip" tabindex="0" data-tip="Seconds to trim off the end of the clip (or stop timestamp) to exclude tail camera shake.">?</span>
+                  </label>
+                  <input id="proc-trim-end" type="number" step="0.5" min="0" max="300" value="0.0" />
+                </div>
               </div>
-            </div>
+            </details>
             <div id="job-estimate-banner" class="banner">Estimated processing time: ~3.5s</div>
             <div style="display: flex; gap: 0.6rem; flex-wrap: wrap;">
-              <button class="primary" style="flex: 1;" onclick="submitProcessingJob()">Run Magnification Job</button>
-              <button onclick="autoDetectBandForClip()">Auto-Find Dominant Band</button>
+              <button id="btn-submit-job" class="primary" style="flex: 1;" onclick="submitProcessingJob()" title="Add this magnification job to the background processing queue">Run Magnification Job</button>
+              <button onclick="autoDetectBandForClip()" title="Scan the clip's FFT spectrum and automatically fill in the strongest periodic frequency band">Auto-Find Dominant Band</button>
             </div>
           </div>
 
@@ -251,14 +554,67 @@
           <div class="card">
             <div class="card-header">
               <span class="card-title">Result Viewer &amp; Method Comparison</span>
-              <select id="view-output-mode" style="width: auto;" onchange="updateComparisonVideoMode()">
-                <option value="comparison_sbs_mp4">Side-by-Side (Original vs. Magnified)</option>
-                <option value="magnified_mp4">Magnified Only</option>
-                <option value="heatmap_mp4">Motion-Energy Heatmap Overlay</option>
-              </select>
+              <div style="display: flex; gap: 0.45rem; align-items: center; flex-wrap: wrap;">
+                <select id="view-output-mode" style="width: auto;" onchange="updateComparisonVideoMode()" title="Choose which visual output to watch for the selected completed job">
+                  <option value="comparison_sbs_mp4">Side-by-Side (Original vs. Magnified)</option>
+                  <option id="opt-dual-sync-mode" value="dual_sync_mp4" class="dual-cam-only">Dual Cam A vs. Cam B (Sync Side-by-Side)</option>
+                  <option value="split_wipe">Interactive Split-Wipe (Original | Magnified)</option>
+                  <option value="magnified_mp4">Magnified Only</option>
+                  <option value="heatmap_mp4">Motion-Energy Heatmap Overlay</option>
+                  <option value="phase_ripple_mp4">Phase-Wave Ripple Map (&minus;&pi; to +&pi;)</option>
+                  <option value="quiver_vectors_mp4">Optical Flow Quiver Vectors</option>
+                </select>
+                <select id="view-player-engine" style="width: auto;" onchange="updateComparisonVideoMode()" title="Stream Mode (MJPEG) works in 100% of browsers; HTML5 Video (H.264) gives a timeline scrubber">
+                  <option value="mjpeg">Universal Stream Player (MJPEG Loop)</option>
+                  <option value="video">HTML5 Video Player (H.264 MP4)</option>
+                </select>
+              </div>
             </div>
-            <div class="video-box">
-              <video id="result-video-player" controls loop muted playsinline></video>
+            <div class="video-box" id="result-viewer-box" style="position: relative; display: block; width: 100%; aspect-ratio: auto; line-height: 0; overflow: hidden;">
+              <img id="result-mjpeg-player" alt="Processed Result Stream" style="display: none; width: 100%; height: auto;" />
+              <video id="result-video-player" controls loop muted playsinline style="display: none; width: 100%; height: auto;"></video>
+              <div id="split-wipe-container" style="display: none; position: relative; width: 100%; user-select: none; overflow: hidden; --wipe-pct: 50%;">
+                <img id="wipe-mag-mjpeg" alt="Magnified Stream" draggable="false" style="display: block; width: 100%; height: auto;" />
+                <img id="wipe-orig-mjpeg" alt="Original Stream" draggable="false" style="position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; clip-path: inset(0 calc(100% - var(--wipe-pct)) 0 0);" />
+                <div id="split-wipe-handle" style="position: absolute; top: 0; bottom: 0; left: var(--wipe-pct); width: 3px; background: #38bdf8; box-shadow: 0 0 8px rgba(2,6,23,0.9); cursor: ew-resize; z-index: 25; transform: translateX(-50%);">
+                  <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #0f172a; border: 2px solid #38bdf8; color: #38bdf8; font-size: 0.7rem; font-weight: 700; padding: 3px 6px; border-radius: 999px; line-height: 1; white-space: nowrap;">&larr; | &rarr;</div>
+                </div>
+                <span style="position: absolute; top: 8px; left: 10px; background: rgba(2,6,23,0.82); color: #e2e8f0; font-size: 0.72rem; font-weight: 600; padding: 3px 7px; border-radius: 4px; line-height: 1.2; z-index: 24; pointer-events: none;">ORIGINAL</span>
+                <span style="position: absolute; top: 8px; right: 10px; background: rgba(2,6,23,0.82); color: #38bdf8; font-size: 0.72rem; font-weight: 600; padding: 3px 7px; border-radius: 4px; line-height: 1.2; z-index: 24; pointer-events: none;">MAGNIFIED</span>
+              </div>
+              <div id="epicenter-marker" class="epicenter-marker" style="display: none;">
+                <span id="epicenter-label" class="epicenter-label">EPICENTER</span>
+              </div>
+              <div id="result-empty-hint" style="color: var(--text-muted); font-size: 0.88rem; padding: 1.5rem 1rem; text-align: center; line-height: 1.5;">
+                Select or run a completed job on the left to view the magnified video.
+              </div>
+            </div>
+            <div class="player-toolbar">
+              <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <button type="button" id="btn-toggle-epicenter" onclick="toggleEpicenterOverlay()" title="Pinpoint the (x, y) coordinates of peak vibration energy on the video">
+                  Epicenter Crosshair: OFF
+                </button>
+                <span id="epicenter-readout" class="badge">Epicenter: —</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
+                <label style="margin: 0; font-size: 0.76rem;">
+                  Slow-Mo:
+                  <select id="view-playback-speed" onchange="updateComparisonVideoMode()" title="Slow-motion playback speed for inspecting rapid oscillations">
+                    <option value="1.0">1.0x (Real-Time)</option>
+                    <option value="0.5">0.5x (Half Speed)</option>
+                    <option value="0.25">0.25x (Quarter Speed)</option>
+                    <option value="0.1">0.10x (Ultra Slow-Mo)</option>
+                  </select>
+                </label>
+                <label style="margin: 0; font-size: 0.76rem;">
+                  Strobe:
+                  <select id="view-strobe-mode" onchange="updateComparisonVideoMode()" title="Digital stroboscope aliasing at f_dominant - df to visually freeze periodic motion">
+                    <option value="off">Off</option>
+                    <option value="beat_0.5">Strobe Beat (&Delta;f = 0.5 Hz)</option>
+                    <option value="beat_0.2">Strobe Freeze (&Delta;f = 0.2 Hz)</option>
+                  </select>
+                </label>
+              </div>
             </div>
             <div id="result-download-bar" style="display: flex; gap: 0.6rem; margin-top: 0.85rem; flex-wrap: wrap;"></div>
           </div>
@@ -278,45 +634,261 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Spectral &amp; Frequency Analysis (FFT / Welch PSD / Spectrogram)</span>
-          <div style="display: flex; gap: 0.6rem; align-items: center;">
-            <select id="analysis-job-select" style="width: 300px;" onchange="loadJobAnalysis()"></select>
-            <a id="btn-export-csv" class="btn primary" href="#" download="signal.csv">Export Signal CSV</a>
+          <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+            <select id="analysis-job-select" style="width: 240px;" onchange="loadJobAnalysis()" title="Primary processed job to inspect"></select>
+            <select id="analysis-baseline-select" style="width: 215px;" onchange="onBaselineJobChange()" title="Optional reference job to overlay on the FFT spectrum for Before vs. After comparison">
+              <option value="">Compare Baseline: None (Single Job)</option>
+            </select>
+            <span id="baseline-delta-badge" class="badge" style="display: none;">&Delta; Peak: —</span>
+            <button type="button" id="btn-export-report" onclick="exportDiagnosticReport()" title="Generate a standalone printable engineering report with heatmap snapshot, metrics table, spectral plots, and plain-English diagnostic summary">Export Diagnostic Report</button>
+            <a id="btn-export-csv" class="btn primary" href="#" download="signal.csv" title="Download frame-by-frame raw and bandpass-filtered ROI signals as a CSV spreadsheet">Export Signal CSV</a>
           </div>
         </div>
 
         <div class="kpi-grid">
           <div class="kpi-box">
-            <div class="kpi-label">Dominant Frequency</div>
+            <div class="kpi-label">
+              Dominant Frequency
+              <span class="tip" tabindex="0" data-tip="Strongest periodic oscillation frequency in Hz detected inside the ROI using FFT and Welch Power Spectral Density.">?</span>
+            </div>
             <div class="kpi-value" id="kpi-dom-hz">— Hz</div>
           </div>
           <div class="kpi-box">
-            <div class="kpi-label">Oscillation / Pulse Rate</div>
+            <div class="kpi-label">
+              Oscillation / Pulse Rate
+              <span class="tip" tabindex="0" data-tip="Dominant frequency expressed in cycles or beats per minute (BPM = Hz &times; 60) for heart rate, breathing, or RPM comparison.">?</span>
+            </div>
             <div class="kpi-value" id="kpi-dom-bpm">— BPM</div>
           </div>
           <div class="kpi-box">
-            <div class="kpi-label">In-Band SNR</div>
+            <div class="kpi-label">
+              In-Band SNR
+              <span class="tip" tabindex="0" data-tip="Signal-to-Noise Ratio (dB) of the dominant spectral peak relative to background noise. Above +6 dB indicates a clean periodic oscillation.">?</span>
+            </div>
             <div class="kpi-value" id="kpi-snr">— dB</div>
           </div>
           <div class="kpi-box">
-            <div class="kpi-label">Suggested Auto-Band</div>
+            <div class="kpi-label">
+              Peak Displacement &amp; ISO Kinematics
+              <span class="tip" tabindex="0" data-tip="Estimated physical peak-to-peak displacement amplitude (um/mm) plus derived ISO kinematic Velocity RMS (mm/s) and Peak Acceleration (g) at the dominant frequency.">?</span>
+            </div>
+            <div class="kpi-value" id="kpi-disp-um" title="Estimated physical displacement amplitude computed from lens FOV or 2-Point Ruler calibration">— &mu;m</div>
+            <div id="kpi-iso-kinematics" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.15rem;">— mm/s RMS | — g</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">
+              Dual-ROI Phase Shift
+              <span class="tip" tabindex="0" data-tip="Cross-spectral phase angle difference between Probe A and Probe B at the dominant frequency. Near 0&deg; = moving together in-phase; near 180&deg; = rocking/pivoting out-of-phase.">?</span>
+            </div>
+            <div class="kpi-value" id="kpi-phase-deg" title="Phase angle difference between Probe A and Probe B (0° in-phase vs. 180° seesaw pivot)">— &deg;</div>
+          </div>
+          <div class="kpi-box">
+            <div class="kpi-label">
+              Suggested Auto-Band
+              <span class="tip" tabindex="0" data-tip="Recommended Low/High Hz bandpass filter window centered around the dominant spectral peak.">?</span>
+            </div>
             <div class="kpi-value" id="kpi-sug-band">— Hz</div>
           </div>
         </div>
 
-        <div class="grid-2">
-          <div>
-            <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">ROI Temporal Signal (Raw Detrended vs. Bandpass Filtered)</h3>
-            <canvas id="canvas-timeseries" class="plot-canvas"></canvas>
+        <div class="player-toolbar" style="margin-bottom: 1rem;">
+          <div style="display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;">
+            <strong>
+              Vibration Sonification ("Listen to ROI")
+              <span class="tip" tabindex="0" data-tip="Converts the detrended ROI vibration waveform into audible sound via Web Audio API so you can hear rhythm, flutter, or bearing harmonics.">?</span>
+            </strong>
+            <button type="button" id="btn-sonify" onclick="toggleRoiSonification()" title="Synthesize audible sound from the extracted ROI vibration waveform using Web Audio API">
+              &#9654; Listen to ROI Signal
+            </button>
+            <button type="button" id="btn-download-wav" onclick="downloadSonifiedWav()" title="Export the active demodulated/sonified ROI audio buffer as a standard 16-bit PCM .WAV file">
+              &#11015; Download .WAV
+            </button>
+            <label style="margin: 0; font-size: 0.78rem;">
+              Audio Mode:
+              <select id="sonify-pitch" onchange="onSonifyModeChange()">
+                <option value="1">1x Real-Time AM+FM Swell (Best for Breathing &amp; Pulse &lt; 3 Hz)</option>
+                <option value="10">4x Fast Time-Lapse Swell (Quick Scan)</option>
+                <option value="50">50x Direct Acoustic Texture (Best for Machine Vibration &amp; Purring)</option>
+              </select>
+            </label>
           </div>
-          <div>
-            <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">FFT Amplitude &amp; Welch PSD Spectrum (Hz)</h3>
-            <canvas id="canvas-fft" class="plot-canvas"></canvas>
+          <span id="calibration-summary-badge" class="badge">Scale: — mm/px</span>
+        </div>
+
+        <div id="dual-cam-analysis-banner" class="player-toolbar dual-cam-only" style="margin-bottom: 1rem; border-color: rgba(56, 189, 248, 0.38); background: rgba(15, 23, 42, 0.72);">
+          <div style="display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;">
+            <strong style="color: #38bdf8;">Dual-Camera Cross-Spectral Sync (Cam A Cyan vs. Cam B Amber):</strong>
+            <span id="dual-cam-phase-badge" class="badge global">Cross-Cam Phase: —&deg;</span>
+            <span id="dual-cam-jitter-badge" class="badge">Sync Jitter: &plusmn;— ms</span>
+            <span id="dual-cam-b-peak-badge" class="badge rolling">Cam B Peak: — Hz</span>
+          </div>
+          <span id="dual-cam-coherence-badge" class="badge">Coherence: —</span>
+        </div>
+
+        <div class="subtab-bar">
+          <button type="button" class="subtab-btn active" data-subtab="fft" onclick="switchAnalysisSubtab('fft')">1. Time-Series &amp; FFT Spectrum</button>
+          <button type="button" class="subtab-btn" data-subtab="spectrogram" onclick="switchAnalysisSubtab('spectrogram')">2. 2D STFT Spectrogram</button>
+          <button type="button" class="subtab-btn" data-subtab="kymograph" onclick="switchAnalysisSubtab('kymograph')">3. 1D Slit-Scan Kymograph</button>
+          <button type="button" class="subtab-btn" data-subtab="dualroi" onclick="switchAnalysisSubtab('dualroi')">4. Dual-ROI Phase Probes (A vs. B)</button>
+          <button type="button" class="subtab-btn" data-subtab="orbit" onclick="switchAnalysisSubtab('orbit')">5. 2D Motion Orbit (X vs. Y)</button>
+          <button type="button" id="subtab-btn-orbit3d" class="subtab-btn dual-cam-only" data-subtab="orbit3d" onclick="switchAnalysisSubtab('orbit3d')">6. Dual-Cam 3D Orbit (X, Y, Z)</button>
+        </div>
+
+        <div id="subtab-panel-fft" class="subtab-panel active">
+          <div class="grid-2">
+            <div>
+              <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">
+                ROI Temporal Signal (Raw Detrended vs. Bandpass Filtered)
+                <span class="tip" tabindex="0" data-tip="Shows frame-by-frame intensity/displacement over time. Cyan = bandpass-filtered signal; Gray = raw detrended signal.">?</span>
+              </h3>
+              <canvas id="canvas-timeseries" class="plot-canvas"></canvas>
+            </div>
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; flex-wrap: wrap;">
+                <h3 style="font-size: 0.9rem; margin: 0; color: var(--text-muted);">
+                  FFT Amplitude &amp; Welch PSD Spectrum (Hz) — Click Peak to Tune
+                  <span class="tip" tabindex="0" data-tip="Hover or click any frequency peak on the FFT graph to inspect its exact Hz/BPM and send a narrow passband directly to Page 3 (Process).">?</span>
+                </h3>
+                <div style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.76rem;">
+                  <span style="color: var(--text-muted);">Zoom:</span>
+                  <select id="fft-zoom-mode" style="width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem;" onchange="onFreqZoomChange('fft')" title="Zoom FFT X-axis and Spectrogram Y-axis to focus on low-frequency breathing/pulse peaks or full Nyquist bandwidth">
+                    <option value="auto" selected>Auto Passband</option>
+                    <option value="low5">Low-Hz (0–5 Hz)</option>
+                    <option value="full">Full Nyquist</option>
+                  </select>
+                </div>
+              </div>
+              <canvas id="canvas-fft" class="plot-canvas" title="Click any spectral peak to tune a narrow bandpass filter around that frequency"></canvas>
+              <div id="fft-alias-warning" class="banner warning" style="display: none; margin-top: 0.4rem; margin-bottom: 0; padding: 0.4rem 0.65rem; font-size: 0.76rem;"></div>
+              <div id="fft-click-bar" class="player-toolbar" style="margin-top: 0.45rem; padding: 0.5rem 0.7rem; flex-direction: column; align-items: stretch; gap: 0.45rem;">
+                <span id="fft-hover-readout" style="font-size: 0.8rem; color: var(--text-muted);">Hover or click any peak on the FFT spectrum to tune magnification cutoffs.</span>
+                <div id="fft-action-buttons" style="display: none; gap: 0.5rem; flex-wrap: wrap;">
+                  <button type="button" id="btn-load-peak-cutoffs" style="padding: 0.35rem 0.75rem; font-size: 0.78rem;" onclick="applySelectedFftPeakToProcess(false)">
+                    Load Cutoffs in Process Tab
+                  </button>
+                  <button type="button" id="btn-magnify-selected-peak" class="primary" style="padding: 0.35rem 0.75rem; font-size: 0.78rem;" onclick="applySelectedFftPeakToProcess(true)">
+                    Magnify This Peak Now
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div style="margin-top: 1.15rem;">
-          <h3 style="font-size: 0.9rem; margin-bottom: 0.4rem; color: var(--text-muted);">2D STFT Time-Frequency Spectrogram (dB)</h3>
-          <canvas id="canvas-spectrogram" class="plot-canvas"></canvas>
+        <div id="subtab-panel-spectrogram" class="subtab-panel">
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.45rem; flex-wrap: wrap;">
+            <h3 style="font-size: 0.9rem; margin: 0; color: var(--text-muted);">
+              2D STFT Time-Frequency Spectrogram (dB) — High-Overlap Zero-Padded
+              <span class="tip" tabindex="0" data-tip="Short-Time Fourier Transform (90% Hann window overlap + 4x zero-padding) showing how vibration frequencies evolve over time with a 40 dB dynamic range floor and cyan peak-track ridge.">?</span>
+            </h3>
+            <div style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.76rem;">
+              <span style="color: var(--text-muted);">Y-Axis Zoom:</span>
+              <select id="spec-zoom-mode" style="width: auto; padding: 0.2rem 0.5rem; font-size: 0.75rem;" onchange="onFreqZoomChange('spec')" title="Zoom Spectrogram Y-axis (Hz) to match passband, 0-5 Hz, or full Nyquist">
+                <option value="auto" selected>Auto Passband</option>
+                <option value="low5">Low-Hz (0–5 Hz)</option>
+                <option value="full">Full Nyquist</option>
+              </select>
+            </div>
+          </div>
+          <canvas id="canvas-spectrogram" class="plot-canvas" style="height: 260px;"></canvas>
+        </div>
+
+        <div id="subtab-panel-kymograph" class="subtab-panel">
+          <div class="player-toolbar" style="margin-bottom: 0.65rem;">
+            <span style="color: var(--text-muted);">
+              Click on the reference thumbnail (or enter a pixel row/column) to position the 1D slit-scan slice line
+              <span class="tip" tabindex="0" data-tip="A spacetime slit-scan plot: X-axis is time (frames) and Y-axis is pixel position along the chosen slice line.">?</span>
+            </span>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <select id="kymo-axis" onchange="refreshKymograph()">
+                <option value="horizontal">Horizontal Slice (Row Y)</option>
+                <option value="vertical">Vertical Slice (Column X)</option>
+              </select>
+              <input id="kymo-pos" type="number" placeholder="Epicenter" style="width: 95px;" onchange="refreshKymograph()" title="Pixel row/column coordinate for the 1D slit-scan line" />
+              <button type="button" onclick="refreshKymograph()">Update Kymograph</button>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: minmax(220px, 290px) 1fr; gap: 0.85rem; align-items: stretch;">
+            <div class="video-box" id="kymo-ref-box" style="position: relative; aspect-ratio: auto; min-height: 180px; cursor: crosshair; user-select: none;" title="Click anywhere on the frame to set the 1D Kymograph slice line">
+              <img id="kymo-ref-img" alt="Reference Frame" style="display: block; width: 100%; height: auto;" />
+              <svg id="kymo-ref-svg" style="position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;"></svg>
+            </div>
+            <canvas id="canvas-kymograph" class="plot-canvas" style="height: 250px;"></canvas>
+          </div>
+        </div>
+
+        <div id="subtab-panel-dualroi" class="subtab-panel">
+          <div class="grid-2">
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.45rem; margin-bottom: 0.45rem; flex-wrap: wrap;">
+                <h3 style="font-size: 0.9rem; margin: 0; color: var(--text-muted);">
+                  Interactive Probe Placement (Drag on Frame)
+                  <span class="tip" tabindex="0" data-tip="Select Probe A (Cyan) or Probe B (Amber) and click-and-drag directly on the frame to place virtual accelerometer boxes.">?</span>
+                </h3>
+                <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                  <button type="button" id="btn-draw-probe-a" class="primary" style="padding: 0.28rem 0.6rem; font-size: 0.76rem; border-color: #38bdf8;" onclick="setActiveDualProbe('A')" title="Click and drag on the image below to place or resize Probe A (Cyan)">
+                    Draw Probe A (Cyan)
+                  </button>
+                  <button type="button" id="btn-draw-probe-b" style="padding: 0.28rem 0.6rem; font-size: 0.76rem;" onclick="setActiveDualProbe('B')" title="Click and drag on the image below to place or resize Probe B (Amber)">
+                    Draw Probe B (Amber)
+                  </button>
+                  <button type="button" id="btn-reset-dualroi" style="padding: 0.28rem 0.55rem; font-size: 0.75rem;" onclick="resetDualRoiAuto()" title="Reset Probe A and Probe B to automatic default regions">
+                    Reset Auto A/B
+                  </button>
+                </div>
+              </div>
+              <div class="video-box" id="dualroi-ref-box" style="position: relative; aspect-ratio: auto; min-height: 200px; cursor: crosshair; user-select: none; overflow: hidden;" title="Click and drag on the frame to place/resize Probe A (Cyan) or Probe B (Amber)">
+                <img id="dualroi-ref-img" alt="Reference Frame" style="display: block; width: 100%; height: auto;" />
+                <svg id="dualroi-ref-svg" style="position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;"></svg>
+              </div>
+              <div class="player-toolbar" style="margin-top: 0.45rem; padding: 0.45rem 0.65rem; gap: 0.45rem;">
+                <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-size: 0.76rem;">
+                  <strong style="color: #38bdf8;">Probe A:</strong>
+                  <input id="dual-roi-a" type="text" placeholder="Auto Left/Top" style="width: 112px; padding: 0.22rem 0.45rem; font-size: 0.75rem;" onchange="runDualRoiComparison()" title="Probe A (x,y,w,h in source pixel space)" />
+                  <strong style="color: #f59e0b;">Probe B:</strong>
+                  <input id="dual-roi-b" type="text" placeholder="Auto Right/Bottom" style="width: 112px; padding: 0.22rem 0.45rem; font-size: 0.75rem;" onchange="runDualRoiComparison()" title="Probe B (x,y,w,h in source pixel space)" />
+                </div>
+                <button type="button" style="padding: 0.28rem 0.65rem; font-size: 0.76rem;" onclick="runDualRoiComparison()">Update Phase</button>
+              </div>
+            </div>
+
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.45rem; flex-wrap: wrap;">
+                <h3 style="font-size: 0.9rem; margin: 0; color: var(--text-muted);">
+                  Dual-Probe Waveform &amp; Phase Lag (Probe A Cyan vs. Probe B Amber)
+                  <span class="tip" tabindex="0" data-tip="Compares bandpass-filtered waveforms of Probe A (#38bdf8) and Probe B (#f59e0b) to measure phase shift (&Delta;&phi;) and coherence.">?</span>
+                </h3>
+                <span id="dual-roi-summary" class="badge global">Phase: —</span>
+              </div>
+              <canvas id="canvas-dual-roi" class="plot-canvas" style="height: 240px;"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <div id="subtab-panel-orbit" class="subtab-panel">
+          <div class="player-toolbar" style="margin-bottom: 0.65rem;">
+            <span style="color: var(--text-muted);">
+              2D Sub-Pixel Motion Orbit (Lissajous Trajectory $X(t)$ vs. $Y(t)$) — Color-graded from Start (Cyan) to End (Amber)
+              <span class="tip" tabindex="0" data-tip="Plots horizontal X(t) vs. vertical Y(t) sub-pixel displacement around the epicenter/ROI to reveal shaft whirl, elliptical flexing, or uniaxial linear vibration.">?</span>
+            </span>
+            <span id="orbit-summary-badge" class="badge global">Principal Axis &theta;: —</span>
+          </div>
+          <div style="display: flex; justify-content: center;">
+            <canvas id="canvas-orbit" class="plot-canvas" style="max-width: 520px; height: 280px;"></canvas>
+          </div>
+        </div>
+
+        <div id="subtab-panel-orbit3d" class="subtab-panel">
+          <div class="player-toolbar" style="margin-bottom: 0.65rem;">
+            <span style="color: var(--text-muted);">
+              Orthogonal Dual-Camera 3D Spatial Trajectory ($X_{\text{Cam A}}, Y_{\text{Shared}}, Z_{\text{Cam B}}$) — Isometric Projection
+              <span class="tip" tabindex="0" data-tip="Combines synchronized Cam A (X, Y) and orthogonal Cam B (Z, Y) bandpass displacements into a 3D isometric vibration orbit.">?</span>
+            </span>
+            <span id="orbit3d-summary-badge" class="badge global">3D RMS Radius: — &mu;m</span>
+          </div>
+          <div style="display: flex; justify-content: center;">
+            <canvas id="canvas-orbit-3d" class="plot-canvas" style="max-width: 580px; height: 300px;"></canvas>
+          </div>
         </div>
       </div>
     </section>
@@ -326,13 +898,29 @@
       <div class="grid-2">
         <div class="card">
           <div class="card-header">
-            <span class="card-title">System Version, Storage &amp; Updates</span>
+            <span class="card-title">System Version, Hardware, Storage &amp; Updates</span>
             <button class="primary" onclick="triggerSystemUpdate()">Check / Update Now</button>
           </div>
           <div class="kpi-grid">
             <div class="kpi-box">
               <div class="kpi-label">Current Version</div>
               <div class="kpi-value" id="sys-version">0.1.0</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Detected Hardware</div>
+              <div class="kpi-value" id="sys-hw-model" style="font-size: 1rem;">Raspberry Pi</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">System RAM</div>
+              <div class="kpi-value" id="sys-ram-gb">— GB</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">CPU Temperature</div>
+              <div class="kpi-value" id="sys-cpu-temp">— &deg;C</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Thermal / Power Status</div>
+              <div class="kpi-value" id="sys-thermal-status" style="font-size: 1rem;">Nominal</div>
             </div>
             <div class="kpi-box">
               <div class="kpi-label">Free Disk Space</div>
@@ -379,15 +967,31 @@
       </div>
       <div class="form-row">
         <div>
-          <label for="setup-focal">Lens Focal Length (mm)</label>
+          <label for="setup-focal">
+            Lens Focal Length (mm)
+            <span class="tip" tabindex="0" data-tip="Optical focal length of your camera lens in millimeters (e.g. 4.0mm for C270, 3.04mm for Pi Cam v2, 6mm/16mm for HQ/Global Shutter lenses).">?</span>
+          </label>
           <input id="setup-focal" type="number" step="0.1" value="4.0" />
         </div>
         <div>
-          <label for="setup-fov">Field of View (&deg;)</label>
+          <label for="setup-fov">
+            Field of View (&deg;)
+            <span class="tip" tabindex="0" data-tip="Horizontal field of view in degrees.">?</span>
+          </label>
           <input id="setup-fov" type="number" step="1" value="60" />
         </div>
         <div>
-          <label for="setup-focus-mode">Focus Type</label>
+          <label for="setup-distance">
+            Target Distance (cm)
+            <span class="tip" tabindex="0" data-tip="Distance from camera lens to vibrating target in centimeters. Used with FOV to calibrate real-world displacement in micrometers (um) and millimeters (mm).">?</span>
+          </label>
+          <input id="setup-distance" type="number" step="1" min="1" max="5000" value="50" />
+        </div>
+        <div>
+          <label for="setup-focus-mode">
+            Focus Type
+            <span class="tip" tabindex="0" data-tip="Fixed Focus (most USB webcams &amp; Pi Cam v2), Manual C/CS ring (HQ &amp; Global Shutter), or Motorized Autofocus (Pi Cam v3).">?</span>
+          </label>
           <select id="setup-focus-mode">
             <option value="fixed">Fixed Focus</option>
             <option value="manual">Manual Ring / C-Mount</option>
@@ -395,12 +999,68 @@
           </select>
         </div>
       </div>
+      <div class="player-toolbar" style="margin-bottom: 0.75rem;">
+        <div>
+          <strong>2-Point Visual Ruler Calibration:</strong>
+          <span id="setup-ruler-status" style="color: var(--text-muted); margin-left: 0.35rem;">Use the "2-Point Ruler" button under Live Preview to click two points of known length (mm).</span>
+        </div>
+        <div style="display: flex; gap: 0.45rem;">
+          <button type="button" onclick="startRulerFromModal()">Launch 2-Point Ruler on Preview</button>
+          <button type="button" onclick="clearRulerCalibration()">Use Lens FOV Model</button>
+        </div>
+      </div>
+
+      <div style="border-top: 1px solid var(--border); padding-top: 0.85rem; margin-bottom: 0.75rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+          <label style="display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; margin: 0; font-weight: 600; color: var(--text-main);">
+            <input id="setup-dual-enable" type="checkbox" style="width: auto;" onchange="onToggleSetupDualCamera()" />
+            Enable Dual-Camera Mode (Synchronized Cam A + Cam B)
+          </label>
+          <span id="setup-dual-tier-badge" class="badge">Checking Dual-Cam Capability...</span>
+        </div>
+        <div id="setup-dual-tier-note" style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.3rem;"></div>
+
+        <div id="setup-dual-panel" class="dual-cam-only" style="margin-top: 0.75rem; padding: 0.75rem; background: var(--bg-main); border: 1px solid var(--border); border-radius: 0.5rem;">
+          <div class="form-row">
+            <div>
+              <label for="setup-camera-b-select">Secondary Camera (Cam B)</label>
+              <select id="setup-camera-b-select"></select>
+            </div>
+            <div>
+              <label for="setup-sync-mode">
+                Synchronization Mode
+                <span class="tip" tabindex="0" data-tip="Hardware Trigger (<10us XVS/GPIO) unlocks full 3D Orbit &amp; cross-camera phase; Software Timestamp Sync (CLOCK_MONOTONIC_RAW) pairs frames by nanosecond clock; Independent records both views without cross-phase plots.">?</span>
+              </label>
+              <select id="setup-sync-mode">
+                <option value="hardware">Hardware Trigger / XVS / GPIO Sync (&lt;10 &mu;s)</option>
+                <option value="software" selected>Software Timestamp Sync (CLOCK_MONOTONIC_RAW)</option>
+                <option value="independent">Independent / Unsynced Dual View</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" style="margin-bottom: 0;">
+            <div>
+              <label for="setup-focal-b">Cam B Focal Length (mm)</label>
+              <input id="setup-focal-b" type="number" step="0.1" value="6.0" />
+            </div>
+            <div>
+              <label for="setup-fov-b">Cam B Field of View (&deg;)</label>
+              <input id="setup-fov-b" type="number" step="1" value="55" />
+            </div>
+            <div>
+              <label for="setup-distance-b">Cam B Target Distance (cm)</label>
+              <input id="setup-distance-b" type="number" step="1" min="1" max="5000" value="50" />
+            </div>
+          </div>
+        </div>
+      </div>
+
       <button class="primary" style="width: 100%; margin-top: 0.5rem;" onclick="saveCameraSetup()">
         Activate Selected Camera &amp; Save Lens Profile
       </button>
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

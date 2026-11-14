@@ -45,3 +45,4 @@ def synthetic_cam() -> SyntheticCameraBackend:
     cam.start(width=128, height=96, fps=30)
     yield cam
     cam.stop()
+

@@ -211,3 +211,4 @@ class Database:
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
             "error_message": row["error_message"],
         }
+
