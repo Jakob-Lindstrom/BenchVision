@@ -4621,6 +4621,126 @@ async function toggleSystemdAutostart(explicitTarget = null, sudoPassword = null
   }
 }
 
+async function submitRebootSudoPassword() {
+  const pwInput = document.getElementById('sys-reboot-password-input');
+  const pw = pwInput ? pwInput.value : '';
+  if (!pw) {
+    if (pwInput) pwInput.focus();
+    return;
+  }
+  pwInput.value = '';
+  await rebootRaspberryPi(pw);
+}
+
+function startRebootReconnectPolling() {
+  let elapsedMs = 0;
+  const poll = async () => {
+    elapsedMs += 3000;
+    try {
+      const resp = await fetch('/api/health', { cache: 'no-store' });
+      if (resp.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {
+      // Expected while the Raspberry Pi is shutting down or booting back up
+    }
+    if (elapsedMs < 180000) {
+      setTimeout(poll, 3000);
+    }
+  };
+  setTimeout(poll, 6000);
+}
+
+async function rebootRaspberryPi(sudoPassword = null) {
+  if (sudoPassword === null) {
+    const ok = window.confirm(
+      'Reboot the Raspberry Pi now? Active capture or jobs will stop, and this page will reconnect automatically when the Pi boots back up.'
+    );
+    if (!ok) return;
+  }
+
+  const btn = document.getElementById('btn-reboot-pi');
+  const authBtn = document.getElementById('btn-authorize-reboot');
+  const svcBanner = document.getElementById('service-status-banner');
+  if (btn) btn.disabled = true;
+  if (authBtn) {
+    authBtn.disabled = true;
+    authBtn.textContent = 'Rebooting...';
+  }
+  let keepDisabled = false;
+  try {
+    const res = await api('/api/system/reboot', {
+      method: 'POST',
+      body: JSON.stringify({ sudo_password: sudoPassword || null }),
+    });
+    if (svcBanner) {
+      svcBanner.style.display = 'block';
+      if (res.status === 'rebooting') {
+        keepDisabled = true;
+        svcBanner.className = 'banner warning';
+        svcBanner.innerHTML = `
+          <div>
+            <strong>${escFrontierHtml(res.message || 'Raspberry Pi is rebooting...')}</strong>
+            <div style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">
+              This page will automatically reload once BenchVision is back online.
+            </div>
+          </div>
+        `;
+        startRebootReconnectPolling();
+      } else if (
+        res.requires_password ||
+        res.status === 'needs_password' ||
+        res.status === 'bad_password'
+      ) {
+        const isBadPw = res.status === 'bad_password';
+        svcBanner.className = isBadPw ? 'banner danger' : 'banner warning';
+        svcBanner.innerHTML = `
+          <div style="display:flex; flex-direction:column; gap:0.55rem;">
+            <div>
+              <strong>${isBadPw ? 'Incorrect Password' : 'Raspberry Pi Administrator Permission Needed'}</strong>
+              <p style="margin:0.25rem 0 0; font-size:0.84rem;">${escFrontierHtml(res.message || 'Enter your Raspberry Pi sudo password once below to authorize reboot.')}</p>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+              <input
+                type="password"
+                id="sys-reboot-password-input"
+                autocomplete="current-password"
+                placeholder="Raspberry Pi sudo password"
+                style="max-width:240px; padding:0.35rem 0.6rem; border-radius:0.4rem; border:1px solid var(--border); background:var(--bg-main); color:var(--text-main);"
+                onkeydown="if (event.key === 'Enter') { event.preventDefault(); submitRebootSudoPassword(); }"
+              />
+              <button type="button" id="btn-authorize-reboot" class="danger" onclick="submitRebootSudoPassword()">Authorize &amp; Reboot Pi</button>
+              <button type="button" onclick="dismissServiceBanner()">Cancel</button>
+            </div>
+            <div style="font-size:0.76rem; color:var(--text-muted);">
+              Authorizing once saves passwordless reboot permission so future clicks work without a password. Your password is never saved.
+            </div>
+          </div>
+        `;
+        const pwEl = document.getElementById('sys-reboot-password-input');
+        if (pwEl) pwEl.focus();
+      } else {
+        svcBanner.className = 'banner danger';
+        svcBanner.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:0.65rem; flex-wrap:wrap;">
+            <span>${escFrontierHtml(res.message || `Reboot error: ${res.status}`)}</span>
+            <button type="button" style="padding:0.2rem 0.55rem; font-size:0.75rem;" onclick="dismissServiceBanner()">Dismiss</button>
+          </div>
+        `;
+      }
+    }
+  } catch (err) {
+    if (svcBanner) {
+      svcBanner.style.display = 'block';
+      svcBanner.className = 'banner danger';
+      svcBanner.textContent = `Reboot failed: ${err.message}`;
+    }
+  } finally {
+    if (btn && !keepDisabled) btn.disabled = false;
+  }
+}
+
 function drawMotionOrbit(canvasId, orbit) {
   const canvas = document.getElementById(canvasId);
   if (!canvas || !orbit) return;

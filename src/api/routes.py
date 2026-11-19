@@ -44,6 +44,7 @@ from src.core.updater import (
     get_cached_release_check,
     get_github_repo,
     get_systemd_service_status,
+    reboot_raspberry_pi,
     set_systemd_autostart,
 )
 from src.processing import JobParams, estimate_processing_time_s, list_processing_methods
@@ -138,6 +139,10 @@ class UpdateClipMetadataRequest(BaseModel):
 
 class ServiceAutostartRequest(BaseModel):
     enable_on_boot: bool = True
+    sudo_password: str | None = None
+
+
+class RebootSystemRequest(BaseModel):
     sudo_password: str | None = None
 
 
@@ -1504,6 +1509,14 @@ def configure_systemd_service(req: ServiceAutostartRequest) -> dict[str, Any]:
         enable_on_boot=req.enable_on_boot,
         sudo_password=req.sudo_password,
     )
+
+
+@router.post("/system/reboot")
+def trigger_system_reboot(req: RebootSystemRequest | None = None) -> dict[str, Any]:
+    """Reboot the Raspberry Pi host after verifying sudo permission."""
+    app_dir = Path(__file__).resolve().parent.parent.parent
+    pw = req.sudo_password if req is not None else None
+    return reboot_raspberry_pi(app_dir=app_dir, sudo_password=pw)
 
 
 @router.post("/system/update")

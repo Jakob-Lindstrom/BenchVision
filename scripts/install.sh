@@ -91,7 +91,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -f "${SERVICE_TEMPLATE}" ]; then
   echo "[6/6] Granting ${TARGET_USER} passwordless UI toggle permission for ${SERVICE_NAME}..."
   TMP_SUDO="$(mktemp)"
   cat > "${TMP_SUDO}" <<EOF
-${TARGET_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl enable ${SERVICE_NAME}, /usr/bin/systemctl disable ${SERVICE_NAME}, /usr/bin/systemctl start ${SERVICE_NAME}, /usr/bin/systemctl stop ${SERVICE_NAME}, /usr/bin/systemctl restart ${SERVICE_NAME}, /usr/bin/systemctl daemon-reload, /bin/systemctl enable ${SERVICE_NAME}, /bin/systemctl disable ${SERVICE_NAME}, /bin/systemctl start ${SERVICE_NAME}, /bin/systemctl stop ${SERVICE_NAME}, /bin/systemctl restart ${SERVICE_NAME}, /bin/systemctl daemon-reload
+${TARGET_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl enable ${SERVICE_NAME}, /usr/bin/systemctl disable ${SERVICE_NAME}, /usr/bin/systemctl start ${SERVICE_NAME}, /usr/bin/systemctl stop ${SERVICE_NAME}, /usr/bin/systemctl restart ${SERVICE_NAME}, /usr/bin/systemctl daemon-reload, /usr/bin/systemctl reboot, /bin/systemctl enable ${SERVICE_NAME}, /bin/systemctl disable ${SERVICE_NAME}, /bin/systemctl start ${SERVICE_NAME}, /bin/systemctl stop ${SERVICE_NAME}, /bin/systemctl restart ${SERVICE_NAME}, /bin/systemctl daemon-reload, /bin/systemctl reboot, /sbin/reboot, /usr/sbin/reboot
 EOF
   if ! command -v visudo >/dev/null 2>&1 || ${SUDO} visudo -cf "${TMP_SUDO}" >/dev/null 2>&1; then
     ${SUDO} install -m 0440 "${TMP_SUDO}" "/etc/sudoers.d/benchvision"

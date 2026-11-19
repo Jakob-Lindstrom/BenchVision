@@ -336,4 +336,85 @@ def test_systemd_autostart_sudo_password_flow(monkeypatch, tmp_path: Path) -> No
         assert any(str(updater.SYSTEMD_SUDOERS_PATH) in " ".join(c) for c, _ in ok_sudo_calls)
 
 
+def test_system_reboot_endpoint_and_ui(monkeypatch, tmp_path: Path) -> None:
+    import types
+
+    from fastapi.testclient import TestClient
+
+    from src.core import updater
+    from src.main import create_app
+
+    seen_runs: list[tuple[list[str], str | None]] = []
+    seen_popens: list[list[str]] = []
+    sudoers_installed = {"ok": False}
+
+    monkeypatch.setattr(
+        updater.shutil,
+        "which",
+        lambda name: {
+            "systemctl": "/usr/bin/systemctl",
+            "reboot": "/sbin/reboot",
+        }.get(name),
+    )
+    monkeypatch.setattr(updater, "SYSTEMD_SUDOERS_PATH", tmp_path / "benchvision.sudoers")
+
+    def fake_run(cmd: list[str], **kwargs) -> types.SimpleNamespace:
+        stdin_pw = kwargs.get("input")
+        seen_runs.append((cmd, stdin_pw))
+        if "-l" in cmd and "-n" in cmd:
+            return types.SimpleNamespace(
+                returncode=0 if sudoers_installed["ok"] else 1,
+                stdout="",
+                stderr="" if sudoers_installed["ok"] else "sudo: a password is required",
+            )
+        if "-S" in cmd:
+            if stdin_pw == "wrong-pw\n":
+                return types.SimpleNamespace(
+                    returncode=1,
+                    stdout="",
+                    stderr="sudo: 1 incorrect password attempt\nSorry, try again.",
+                )
+            if stdin_pw == "pi-secret\n":
+                sudoers_installed["ok"] = True
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_popen(cmd: list[str], **_kwargs) -> types.SimpleNamespace:
+        seen_popens.append(cmd)
+        return types.SimpleNamespace(pid=99999)
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+    monkeypatch.setattr(updater.subprocess, "Popen", fake_popen)
+
+    app = create_app(data_dir=tmp_path / "data", start_worker=False, realtime_synthetic=False)
+    with TestClient(app) as client:
+        html = client.get("/").text
+        assert "btn-reboot-pi" in html
+        assert "rebootRaspberryPi" in html
+
+        # 1. Without NOPASSWD rule, UI prompts for password
+        res_need = client.post("/api/system/reboot", json={}).json()
+        assert res_need["status"] == "needs_password"
+        assert res_need["requires_password"] is True
+        assert not seen_popens
+
+        # 2. Wrong password returns bad_password and does not reboot
+        res_bad = client.post("/api/system/reboot", json={"sudo_password": "wrong-pw"}).json()
+        assert res_bad["status"] == "bad_password"
+        assert res_bad["requires_password"] is True
+        assert not seen_popens
+
+        # 3. Valid password installs sudoers rules (including reboot) and schedules detached reboot
+        res_ok = client.post("/api/system/reboot", json={"sudo_password": "pi-secret"}).json()
+        assert res_ok["status"] == "rebooting"
+        assert res_ok["requires_password"] is False
+        assert len(seen_popens) == 1
+        assert "reboot" in " ".join(seen_popens[0])
+
+        # 4. Subsequent click now sees NOPASSWD via sudo -n -l and reboots without password
+        res_nopw = client.post("/api/system/reboot", json={}).json()
+        assert res_nopw["status"] == "rebooting"
+        assert len(seen_popens) == 2
+
+
 

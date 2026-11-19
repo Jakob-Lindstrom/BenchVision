@@ -3,6 +3,7 @@
 All notable releases of **BenchVision** are documented in this file. `GET /api/system` reads directly from this file so the UI changelog stays synchronized with the installed version.
 
 ## [1.0.1] - 2026-11-19
+- **One-Click Raspberry Pi Reboot Button (`5. System`):** Added a **Reboot Raspberry Pi** button (`POST /api/system/reboot`) with confirmation, automatic sudoers setup/inline `sudo` password prompt when needed, and automatic browser reload polling once the Pi finishes booting.
 - **Persistent Boot-Service Status Banner & Inline `sudo` Prompt:** Added a dedicated `#service-status-banner` in `5. System` that stays visible during status refreshes and lets you authorize `benchvision.service` and `/etc/sudoers.d/benchvision` with your Raspberry Pi `sudo` password directly in the browser if `./scripts/install.sh` was skipped.
 - **GitHub Release, Tag & Branch Update Detection + One-Click Verify:** Enhanced `check_github_release` to detect newer versions across GitHub Releases, Git tags, and the default branch (`master`/`main`), and added a **Re-Download & Test Updater** option in `5. System` so you can test the `.tar.gz` updater even when already on the latest version.
 

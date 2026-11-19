@@ -270,6 +270,8 @@ def extract_release_archive_safely(archive_path: Path, app_dir: Path) -> list[st
                         continue
                     with src_fh, target.open("wb") as dst_fh:
                         shutil.copyfileobj(src_fh, dst_fh)
+                    if (member.mode & 0o111) or target.suffix == ".sh" or target.name == "run.py":
+                        target.chmod(0o755)
 
         top_entries = list(stage_root.iterdir())
         if (
@@ -519,7 +521,7 @@ def _run_sudo_command(
 
 
 def _build_sudoers_rules(user_name: str, systemctl_bin: str) -> str:
-    """Build passwordless sudoers rules matching scripts/install.sh for benchvision.service."""
+    """Build passwordless sudoers rules matching scripts/install.sh for benchvision.service & reboot."""
     cmds: list[str] = []
     seen_bins: list[str] = []
     for candidate in ("/usr/bin/systemctl", "/bin/systemctl", systemctl_bin):
@@ -529,7 +531,53 @@ def _build_sudoers_rules(user_name: str, systemctl_bin: str) -> str:
         for action in ("enable", "disable", "start", "stop", "restart"):
             cmds.append(f"{bin_path} {action} benchvision.service")
         cmds.append(f"{bin_path} daemon-reload")
+        cmds.append(f"{bin_path} reboot")
+    for rb in ("/sbin/reboot", "/usr/sbin/reboot"):
+        if rb not in cmds:
+            cmds.append(rb)
     return f"{user_name} ALL=(root) NOPASSWD: {', '.join(cmds)}\n"
+
+
+def _install_sudoers_rules(
+    user_name: str,
+    systemctl_bin: str,
+    sudo_password: str,
+) -> subprocess.CompletedProcess[str] | None:
+    """Validate with visudo and write /etc/sudoers.d/benchvision using sudo_password."""
+    sudoers_txt = _build_sudoers_rules(user_name, systemctl_bin)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as sf:
+        sf.write(sudoers_txt)
+        tmp_sudoers = Path(sf.name)
+    try:
+        visudo_bin = shutil.which("visudo") or (
+            "/usr/sbin/visudo" if Path("/usr/sbin/visudo").exists() else None
+        )
+        if visudo_bin:
+            check_res = _run_sudo_command(
+                [visudo_bin, "-cf", str(tmp_sudoers)],
+                sudo_password=sudo_password,
+            )
+            if check_res.returncode != 0:
+                return check_res
+        inst_res = _run_sudo_command(
+            ["install", "-m", "0440", str(tmp_sudoers), str(SYSTEMD_SUDOERS_PATH)],
+            sudo_password=sudo_password,
+        )
+        if inst_res.returncode != 0:
+            return inst_res
+    finally:
+        tmp_sudoers.unlink(missing_ok=True)
+    return None
+
+
+def _is_sudo_auth_failure(res: subprocess.CompletedProcess[str]) -> tuple[bool, str]:
+    detail = (res.stderr or res.stdout or "").strip()
+    detail_low = detail.lower()
+    auth_failed = any(
+        tok in detail_low
+        for tok in ("sorry, try again", "incorrect password", "authentication failure", "password")
+    )
+    return auth_failed, detail
 
 
 def _ensure_service_and_sudoers_installed(
@@ -573,29 +621,9 @@ def _ensure_service_and_sudoers_installed(
                 tmp_unit.unlink(missing_ok=True)
 
     if sudo_password and not SYSTEMD_SUDOERS_PATH.exists():
-        sudoers_txt = _build_sudoers_rules(user_name, systemctl_bin)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as sf:
-            sf.write(sudoers_txt)
-            tmp_sudoers = Path(sf.name)
-        try:
-            visudo_bin = shutil.which("visudo") or (
-                "/usr/sbin/visudo" if Path("/usr/sbin/visudo").exists() else None
-            )
-            if visudo_bin:
-                check_res = _run_sudo_command(
-                    [visudo_bin, "-cf", str(tmp_sudoers)],
-                    sudo_password=sudo_password,
-                )
-                if check_res.returncode != 0:
-                    return check_res
-            inst_res = _run_sudo_command(
-                ["install", "-m", "0440", str(tmp_sudoers), str(SYSTEMD_SUDOERS_PATH)],
-                sudo_password=sudo_password,
-            )
-            if inst_res.returncode != 0:
-                return inst_res
-        finally:
-            tmp_sudoers.unlink(missing_ok=True)
+        sudo_err = _install_sudoers_rules(user_name, systemctl_bin, sudo_password)
+        if sudo_err is not None:
+            return sudo_err
 
     return None
 
@@ -642,12 +670,7 @@ def set_systemd_autostart(
         }
 
     if res.returncode != 0:
-        detail = (res.stderr or res.stdout or "").strip()
-        detail_low = detail.lower()
-        auth_failed = any(
-            tok in detail_low
-            for tok in ("sorry, try again", "incorrect password", "authentication failure", "password")
-        )
+        auth_failed, detail = _is_sudo_auth_failure(res)
         if clean_pw is not None and auth_failed:
             return {
                 "status": "bad_password",
@@ -656,7 +679,7 @@ def set_systemd_autostart(
                 "message": "Incorrect Raspberry Pi sudo password. Please check your password and try again.",
                 **get_systemd_service_status(app_dir),
             }
-        if "password" in detail_low or clean_pw is None:
+        if "password" in detail.lower() or clean_pw is None:
             return {
                 "status": "needs_password",
                 "requires_password": True,
@@ -696,4 +719,65 @@ def set_systemd_autostart(
             else "Auto-start on boot DISABLED — BenchVision will only start when you launch it manually."
         ),
         **status_info,
+    }
+
+
+def reboot_raspberry_pi(
+    app_dir: Path,
+    sudo_password: str | None = None,
+) -> dict[str, Any]:
+    """Authorize (via sudoers or one-time sudo password) and schedule a clean host reboot."""
+    del app_dir
+    systemctl_bin = shutil.which("systemctl") or "/usr/bin/systemctl"
+    reboot_bin = shutil.which("reboot") or "/sbin/reboot"
+    clean_pw = sudo_password if sudo_password else None
+
+    try:
+        if clean_pw is not None:
+            err_res = _install_sudoers_rules(getpass.getuser(), systemctl_bin, clean_pw)
+            if err_res is not None:
+                auth_failed, detail = _is_sudo_auth_failure(err_res)
+                if auth_failed:
+                    return {
+                        "status": "bad_password",
+                        "requires_password": True,
+                        "message": "Incorrect Raspberry Pi sudo password. Please check your password and try again.",
+                    }
+                return {
+                    "status": "needs_password",
+                    "requires_password": True,
+                    "message": (
+                        "Could not authorize reboot with sudo. "
+                        + (f"({detail})" if detail else "Please check your sudo permission.")
+                    ),
+                }
+        else:
+            check_res = _run_sudo_command(["-l", systemctl_bin, "reboot"], sudo_password=None)
+            if check_res.returncode != 0:
+                return {
+                    "status": "needs_password",
+                    "requires_password": True,
+                    "message": (
+                        "Enter your Raspberry Pi sudo password once below to authorize and reboot the Pi "
+                        "(this also saves passwordless reboot permission for future clicks)."
+                    ),
+                }
+
+        subprocess.Popen(
+            ["bash", "-c", f"sleep 1.0 && (sudo -n {systemctl_bin} reboot || sudo -n {reboot_bin})"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "requires_password": False,
+            "message": f"Failed to trigger reboot: {exc}",
+        }
+
+    return {
+        "status": "rebooting",
+        "requires_password": False,
+        "message": "Raspberry Pi is rebooting now... Waiting for BenchVision to come back online.",
     }
