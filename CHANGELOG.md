@@ -5,7 +5,7 @@ All notable releases of **BenchVision** are documented in this file. `GET /api/s
 ## [1.0.1] - 2026-11-19
 - **One-Click Raspberry Pi Reboot Button (`5. System`):** Added a **Reboot Raspberry Pi** button (`POST /api/system/reboot`) with confirmation, automatic sudoers setup/inline `sudo` password prompt when needed, and automatic browser reload polling once the Pi finishes booting.
 - **Persistent Boot-Service Status Banner & Inline `sudo` Prompt:** Added a dedicated `#service-status-banner` in `5. System` that stays visible during status refreshes and lets you authorize `benchvision.service` and `/etc/sudoers.d/benchvision` with your Raspberry Pi `sudo` password directly in the browser if `./scripts/install.sh` was skipped.
-- **GitHub Release, Tag & Branch Update Detection + One-Click Verify:** Enhanced `check_github_release` to detect newer versions across GitHub Releases, Git tags, and the default branch (`master`/`main`), and added a **Re-Download & Test Updater** option in `5. System` so you can test the `.tar.gz` updater even when already on the latest version.
+- **GitHub Release, Tag & Branch Update Detection:** Enhanced `check_github_release` to detect newer versions seamlessly across GitHub Releases, Git tags, and the default branch (`master`/`main`).
 
 ## [1.0.0] - 2026-11-19
 - **Clip Deep Inspector (Low-RAM Streaming):** Added Auto-Find Vibrations (`DMD`), Airflow & Swirl Map (`Fluid LIC`), Flex & Stress Map (`Optical Strain`), and Light Flicker & Scanline Sound (`.WAV`) with plain-English summaries, PNG exports, and cancelable progress.

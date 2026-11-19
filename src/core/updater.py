@@ -532,10 +532,27 @@ def _build_sudoers_rules(user_name: str, systemctl_bin: str) -> str:
             cmds.append(f"{bin_path} {action} benchvision.service")
         cmds.append(f"{bin_path} daemon-reload")
         cmds.append(f"{bin_path} reboot")
+        cmds.append(f"{bin_path} reboot -i")
     for rb in ("/sbin/reboot", "/usr/sbin/reboot"):
         if rb not in cmds:
             cmds.append(rb)
     return f"{user_name} ALL=(root) NOPASSWD: {', '.join(cmds)}\n"
+
+
+def _has_passwordless_reboot_permission() -> bool:
+    """Verify via `sudo -n -l` that a NOPASSWD rule actually permits reboot."""
+    try:
+        check_res = _run_sudo_command(["-l"], sudo_password=None)
+    except Exception:  # noqa: BLE001
+        return False
+    if check_res.returncode != 0:
+        return False
+    for line in (check_res.stdout or "").splitlines():
+        if "NOPASSWD" in line and (
+            "reboot" in line or "NOPASSWD: ALL" in line or "NOPASSWD:ALL" in line
+        ):
+            return True
+    return False
 
 
 def _install_sudoers_rules(
@@ -606,7 +623,7 @@ def _ensure_service_and_sudoers_installed(
                 tmp_unit = Path(tf.name)
             try:
                 cp_res = _run_sudo_command(
-                    ["cp", str(tmp_unit), str(SYSTEMD_UNIT_PATH)],
+                    ["install", "-m", "0644", str(tmp_unit), str(SYSTEMD_UNIT_PATH)],
                     sudo_password=sudo_password,
                 )
                 if cp_res.returncode != 0:
@@ -752,8 +769,7 @@ def reboot_raspberry_pi(
                     ),
                 }
         else:
-            check_res = _run_sudo_command(["-l", systemctl_bin, "reboot"], sudo_password=None)
-            if check_res.returncode != 0:
+            if not _has_passwordless_reboot_permission():
                 return {
                     "status": "needs_password",
                     "requires_password": True,
@@ -764,7 +780,11 @@ def reboot_raspberry_pi(
                 }
 
         subprocess.Popen(
-            ["bash", "-c", f"sleep 1.0 && (sudo -n {systemctl_bin} reboot || sudo -n {reboot_bin})"],
+            [
+                "bash",
+                "-c",
+                f"sleep 1.0 && (sudo -n {systemctl_bin} reboot -i || sudo -n {systemctl_bin} reboot || sudo -n {reboot_bin})",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

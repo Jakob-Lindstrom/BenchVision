@@ -4373,26 +4373,14 @@ async function loadSystemStatus(checkRemote = true, forceRefresh = false) {
           <span style="color: var(--text-muted); margin-left: 0.35rem;">(${escFrontierHtml(data.github_repo)})</span>
           ${repoLink}
         </div>
-        <button type="button" id="btn-install-update" class="primary" onclick="installGithubUpdate('${escFrontierHtml(data.latest_version)}', false)">
+        <button type="button" id="btn-install-update" class="primary" onclick="installGithubUpdate('${escFrontierHtml(data.latest_version)}')">
           &#11015; Install v${escFrontierHtml(data.latest_version)} Now
         </button>
       `;
     } else if (data.update_check_status === 'ok' || data.update_check_status === 'no_releases') {
-      const targetVer = data.latest_version || data.current_version;
-      updBanner.style.display = 'flex';
-      updBanner.style.justifyContent = 'space-between';
-      updBanner.style.alignItems = 'center';
-      updBanner.style.gap = '0.65rem';
-      updBanner.style.flexWrap = 'wrap';
+      updBanner.style.display = 'block';
       updBanner.className = 'banner success';
-      updBanner.innerHTML = `
-        <div>
-          Up to date with GitHub (<strong>${escFrontierHtml(data.github_repo)}</strong> &bull; v${escFrontierHtml(data.current_version)}) ${repoLink}
-        </div>
-        <button type="button" id="btn-install-update" style="padding: 0.28rem 0.65rem; font-size: 0.78rem;" onclick="installGithubUpdate('${escFrontierHtml(targetVer)}', true)" title="Test the GitHub .tar.gz download, backup, and safe extraction flow">
-          &#8635; Re-Download &amp; Test Updater
-        </button>
-      `;
+      updBanner.innerHTML = `Up to date with GitHub (<strong>${escFrontierHtml(data.github_repo)}</strong> &bull; v${escFrontierHtml(data.current_version)}) ${repoLink}`;
     } else if (data.update_check_status === 'offline') {
       updBanner.style.display = 'block';
       updBanner.className = 'banner warning';
@@ -4478,7 +4466,7 @@ async function checkForGithubUpdates() {
   }
 }
 
-async function installGithubUpdate(targetVersion, forceReinstall = false) {
+async function installGithubUpdate(targetVersion) {
   const label = targetVersion ? `v${targetVersion}` : 'the latest release';
   if (!window.confirm(`Download and install ${label} from GitHub? Your ./data folder and clips will NOT be touched.`)) {
     return;
@@ -4490,8 +4478,7 @@ async function installGithubUpdate(targetVersion, forceReinstall = false) {
     btn.textContent = 'Installing update...';
   }
   try {
-    const endpoint = `/api/system/update?apply=true${forceReinstall ? '&force=true' : ''}`;
-    const res = await api(endpoint, { method: 'POST' });
+    const res = await api('/api/system/update?apply=true', { method: 'POST' });
     if (updBanner) {
       updBanner.style.display = 'block';
       updBanner.className = res.status === 'updated' || res.status === 'up_to_date' ? 'banner success' : 'banner danger';
@@ -4509,7 +4496,7 @@ async function installGithubUpdate(targetVersion, forceReinstall = false) {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = forceReinstall ? 'Re-Download & Test Updater' : `Install ${label}`;
+      btn.textContent = `Install ${label}`;
     }
   }
 }
@@ -4633,23 +4620,36 @@ async function submitRebootSudoPassword() {
 }
 
 function startRebootReconnectPolling() {
-  let elapsedMs = 0;
+  const startedAt = Date.now();
+  let sawOffline = false;
   const poll = async () => {
-    elapsedMs += 3000;
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    const statusEl = document.getElementById('reboot-reconnect-status');
+    if (statusEl) {
+      statusEl.textContent = sawOffline
+        ? `Pi is restarting (${elapsedSec}s elapsed) — waiting for BenchVision to come back online...`
+        : `Shutting down services (${elapsedSec}s elapsed) — waiting for Pi reboot...`;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
     try {
-      const resp = await fetch('/api/health', { cache: 'no-store' });
-      if (resp.ok) {
+      const resp = await fetch('/api/health', { cache: 'no-store', signal: ctrl.signal });
+      clearTimeout(timer);
+      if (resp.ok && (sawOffline || elapsedSec >= 15)) {
         window.location.reload();
         return;
       }
     } catch (_) {
-      // Expected while the Raspberry Pi is shutting down or booting back up
+      clearTimeout(timer);
+      sawOffline = true;
     }
-    if (elapsedMs < 180000) {
+    if (elapsedSec < 180) {
       setTimeout(poll, 3000);
+    } else if (statusEl) {
+      statusEl.textContent = 'Timed out waiting for reboot. Refresh manually once the Raspberry Pi is ready.';
     }
   };
-  setTimeout(poll, 6000);
+  setTimeout(poll, 10000);
 }
 
 async function rebootRaspberryPi(sudoPassword = null) {
@@ -4682,8 +4682,8 @@ async function rebootRaspberryPi(sudoPassword = null) {
         svcBanner.innerHTML = `
           <div>
             <strong>${escFrontierHtml(res.message || 'Raspberry Pi is rebooting...')}</strong>
-            <div style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">
-              This page will automatically reload once BenchVision is back online.
+            <div id="reboot-reconnect-status" style="font-size:0.78rem; color:var(--text-muted); margin-top:0.25rem;">
+              Shutting down services — this page will automatically reload once BenchVision is back online.
             </div>
           </div>
         `;

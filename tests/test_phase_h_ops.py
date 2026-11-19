@@ -362,10 +362,17 @@ def test_system_reboot_endpoint_and_ui(monkeypatch, tmp_path: Path) -> None:
         stdin_pw = kwargs.get("input")
         seen_runs.append((cmd, stdin_pw))
         if "-l" in cmd and "-n" in cmd:
+            if sudoers_installed["ok"]:
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="    (ALL : ALL) ALL\n    (root) NOPASSWD: /usr/bin/systemctl enable benchvision.service, /usr/bin/systemctl reboot\n",
+                    stderr="",
+                )
+            # Mimics older /etc/sudoers.d/benchvision without reboot rule (sudo -n -l exits 0!)
             return types.SimpleNamespace(
-                returncode=0 if sudoers_installed["ok"] else 1,
-                stdout="",
-                stderr="" if sudoers_installed["ok"] else "sudo: a password is required",
+                returncode=0,
+                stdout="    (ALL : ALL) ALL\n    (root) NOPASSWD: /usr/bin/systemctl enable benchvision.service\n",
+                stderr="",
             )
         if "-S" in cmd:
             if stdin_pw == "wrong-pw\n":
