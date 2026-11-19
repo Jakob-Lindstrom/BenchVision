@@ -15,7 +15,7 @@ HTTPS_REMOTE="https://github.com/${GITHUB_REPO}.git"
 cd "${APP_DIR}"
 
 CURRENT_REV="$(git rev-parse HEAD 2>/dev/null || echo 'release')"
-CURRENT_VER="$("${VENV_DIR}/bin/python3" -c 'import sys; sys.path.insert(0, "."); import src; print(src.__version__)' 2>/dev/null || echo '1.0.0')"
+CURRENT_VER="$("${VENV_DIR}/bin/python3" -c 'import sys; sys.path.insert(0, "."); import src; print(src.__version__)' 2>/dev/null || echo '1.0.1')"
 
 if [ "${1:-}" = "--check-only" ]; then
   echo "Current version: v${CURRENT_VER} (commit ${CURRENT_REV:0:7}). Data folder (${APP_DIR}/data) is intact."

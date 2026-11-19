@@ -4373,14 +4373,26 @@ async function loadSystemStatus(checkRemote = true, forceRefresh = false) {
           <span style="color: var(--text-muted); margin-left: 0.35rem;">(${escFrontierHtml(data.github_repo)})</span>
           ${repoLink}
         </div>
-        <button type="button" id="btn-install-update" class="primary" onclick="installGithubUpdate('${escFrontierHtml(data.latest_version)}')">
+        <button type="button" id="btn-install-update" class="primary" onclick="installGithubUpdate('${escFrontierHtml(data.latest_version)}', false)">
           &#11015; Install v${escFrontierHtml(data.latest_version)} Now
         </button>
       `;
     } else if (data.update_check_status === 'ok' || data.update_check_status === 'no_releases') {
-      updBanner.style.display = 'block';
+      const targetVer = data.latest_version || data.current_version;
+      updBanner.style.display = 'flex';
+      updBanner.style.justifyContent = 'space-between';
+      updBanner.style.alignItems = 'center';
+      updBanner.style.gap = '0.65rem';
+      updBanner.style.flexWrap = 'wrap';
       updBanner.className = 'banner success';
-      updBanner.innerHTML = `Up to date with GitHub (<strong>${escFrontierHtml(data.github_repo)}</strong> &bull; v${escFrontierHtml(data.current_version)}) ${repoLink}`;
+      updBanner.innerHTML = `
+        <div>
+          Up to date with GitHub (<strong>${escFrontierHtml(data.github_repo)}</strong> &bull; v${escFrontierHtml(data.current_version)}) ${repoLink}
+        </div>
+        <button type="button" id="btn-install-update" style="padding: 0.28rem 0.65rem; font-size: 0.78rem;" onclick="installGithubUpdate('${escFrontierHtml(targetVer)}', true)" title="Test the GitHub .tar.gz download, backup, and safe extraction flow">
+          &#8635; Re-Download &amp; Test Updater
+        </button>
+      `;
     } else if (data.update_check_status === 'offline') {
       updBanner.style.display = 'block';
       updBanner.className = 'banner warning';
@@ -4466,7 +4478,7 @@ async function checkForGithubUpdates() {
   }
 }
 
-async function installGithubUpdate(targetVersion) {
+async function installGithubUpdate(targetVersion, forceReinstall = false) {
   const label = targetVersion ? `v${targetVersion}` : 'the latest release';
   if (!window.confirm(`Download and install ${label} from GitHub? Your ./data folder and clips will NOT be touched.`)) {
     return;
@@ -4478,7 +4490,8 @@ async function installGithubUpdate(targetVersion) {
     btn.textContent = 'Installing update...';
   }
   try {
-    const res = await api('/api/system/update?apply=true', { method: 'POST' });
+    const endpoint = `/api/system/update?apply=true${forceReinstall ? '&force=true' : ''}`;
+    const res = await api(endpoint, { method: 'POST' });
     if (updBanner) {
       updBanner.style.display = 'block';
       updBanner.className = res.status === 'updated' || res.status === 'up_to_date' ? 'banner success' : 'banner danger';
@@ -4496,7 +4509,7 @@ async function installGithubUpdate(targetVersion) {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = `Install ${label}`;
+      btn.textContent = forceReinstall ? 'Re-Download & Test Updater' : `Install ${label}`;
     }
   }
 }

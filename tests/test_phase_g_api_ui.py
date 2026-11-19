@@ -104,8 +104,8 @@ def test_full_api_and_ui_workflow(temp_data_dir: Path) -> None:
         assert comp["job_count"] == 1
 
         sys_info = client.get("/api/system").json()
-        assert sys_info["current_version"] == __version__ == "1.0.0"
-        assert sys_info["changelog"][0]["version"] == "1.0.0"
+        assert sys_info["current_version"] == __version__ == "1.0.1"
+        assert sys_info["changelog"][0]["version"] == "1.0.1"
         assert sys_info["disk"]["free_bytes"] > 0
         assert "hardware" in sys_info
         assert "inspector_budgets" in sys_info["hardware"]

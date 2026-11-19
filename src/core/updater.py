@@ -68,6 +68,30 @@ def _github_get_json(url: str, current_version: str, timeout_s: float) -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _github_get_branch_version(
+    repo: str, current_version: str, timeout_s: float
+) -> tuple[str, str] | None:
+    """Fetch __version__ from the repository default branch when tags/releases lag behind."""
+    version_re = re.compile(r'__version__\s*=\s*["\']([^"\']+)["\']')
+    for branch in ("master", "main"):
+        raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/src/__init__.py"
+        req = urllib.request.Request(
+            raw_url,
+            headers={"User-Agent": f"BenchVision/{current_version}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                text = resp.read().decode("utf-8", errors="ignore")
+            m = version_re.search(text)
+            if m:
+                ver = m.group(1).strip().lstrip("vV")
+                if ver:
+                    return (ver, branch)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            continue
+    return None
+
+
 def get_cached_release_check(
     current_version: str, repo: str | None = None
 ) -> dict[str, Any] | None:
@@ -176,6 +200,29 @@ def check_github_release(
                 )
             else:
                 result["check_status"] = "no_releases"
+        if not result["update_available"] or not result["download_url"]:
+            branch_info = _github_get_branch_version(eff_repo, current_version, timeout_s)
+            if branch_info is not None:
+                branch_ver, branch_name = branch_info
+                if (
+                    parse_semver(branch_ver) > parse_semver(result["latest_version"])
+                    or not result["download_url"]
+                ):
+                    result.update(
+                        {
+                            "latest_version": branch_ver,
+                            "latest_tag": f"v{branch_ver}",
+                            "update_available": (
+                                parse_semver(branch_ver) > parse_semver(current_version)
+                            ),
+                            "release_url": f"https://github.com/{eff_repo}/tree/{branch_name}",
+                            "download_url": (
+                                f"https://github.com/{eff_repo}/archive/refs/heads/"
+                                f"{branch_name}.tar.gz"
+                            ),
+                            "check_status": "ok",
+                        }
+                    )
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
         result["check_status"] = "offline"
         result["error"] = str(exc)

@@ -110,6 +110,7 @@ def test_github_updater_semver_and_release_checks(monkeypatch, tmp_path: Path) -
         return [{"name": "v1.1.0"}, {"name": "v0.7.0"}]
 
     monkeypatch.setattr(updater, "_github_get_json", fake_tags_fallback)
+    monkeypatch.setattr(updater, "_github_get_branch_version", lambda *_a, **_kw: None)
     rel_tag = updater.check_github_release(
         "1.0.0", repo="Jakob-Lindstrom/BenchVision", force_refresh=True
     )
@@ -118,11 +119,28 @@ def test_github_updater_semver_and_release_checks(monkeypatch, tmp_path: Path) -
     assert rel_tag["update_available"] is True
     assert "archive/refs/tags/v1.1.0.tar.gz" in (rel_tag["download_url"] or "")
 
+    # 2b. Branch __version__ fallback detects newer master commit even before tags/releases are pushed
+    def fake_only_old_tag(url: str, current_version: str, timeout_s: float):
+        if "releases/latest" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+        return [{"name": "v1.0.0"}]
+
+    monkeypatch.setattr(updater, "_github_get_json", fake_only_old_tag)
+    monkeypatch.setattr(updater, "_github_get_branch_version", lambda *_a, **_kw: ("1.0.1", "master"))
+    rel_branch = updater.check_github_release(
+        "1.0.0", repo="Jakob-Lindstrom/BenchVision", force_refresh=True
+    )
+    assert rel_branch["check_status"] == "ok"
+    assert rel_branch["latest_version"] == "1.0.1"
+    assert rel_branch["update_available"] is True
+    assert "archive/refs/heads/master.tar.gz" in (rel_branch["download_url"] or "")
+
     # 3. Offline error degrades cleanly without raising
     def fake_offline(url: str, current_version: str, timeout_s: float):
         raise urllib.error.URLError("Name resolution failure")
 
     monkeypatch.setattr(updater, "_github_get_json", fake_offline)
+    monkeypatch.setattr(updater, "_github_get_branch_version", lambda *_a, **_kw: None)
     rel_off = updater.check_github_release(
         "1.0.0", repo="Jakob-Lindstrom/BenchVision", force_refresh=True
     )
