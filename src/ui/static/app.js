@@ -32,6 +32,9 @@ const state = {
   dualSyncMode: 'software',
   dualTier: null,
   dualPreviewView: 'sbs',
+  pendingProcessClipId: null,
+  pendingAnalysisJobId: null,
+  frontierModal: null,
 };
 
 function formatDefaultClipTitle() {
@@ -75,6 +78,42 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+function parseNumOr(el, fallback) {
+  if (!el) return fallback;
+  const val = parseFloat(el.value);
+  return Number.isFinite(val) ? val : fallback;
+}
+
+function parseIntOr(el, fallback) {
+  if (!el) return fallback;
+  const val = parseInt(el.value, 10);
+  return Number.isFinite(val) ? val : fallback;
+}
+
+function pulseHighlightElements(elements) {
+  elements.forEach((el) => {
+    if (!el) return;
+    el.classList.remove('pulse-highlight');
+    void el.offsetWidth;
+    el.classList.add('pulse-highlight');
+    setTimeout(() => el.classList.remove('pulse-highlight'), 3000);
+  });
+}
+
+function pauseProcessPlaybackStreams() {
+  const videoEl = document.getElementById('result-video-player');
+  const mjpegImg = document.getElementById('result-mjpeg-player');
+  const wipeOrig = document.getElementById('wipe-orig-mjpeg');
+  const wipeMag = document.getElementById('wipe-mag-mjpeg');
+  if (videoEl) {
+    videoEl.pause();
+    videoEl.removeAttribute('src');
+  }
+  if (mjpegImg) mjpegImg.removeAttribute('src');
+  if (wipeOrig) wipeOrig.removeAttribute('src');
+  if (wipeMag) wipeMag.removeAttribute('src');
+}
+
 function switchPage(pageId) {
   document.querySelectorAll('.page-section').forEach((el) => el.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach((el) => el.classList.remove('active'));
@@ -82,6 +121,20 @@ function switchPage(pageId) {
   if (sec) sec.classList.add('active');
   const btn = document.querySelector(`.nav-tab[data-page="${pageId}"]`);
   if (btn) btn.classList.add('active');
+
+  // Disconnect inactive infinite MJPEG streams to free browser HTTP connections & Pi CPU
+  const liveImg = document.getElementById('live-preview-img');
+  if (pageId === 'record') {
+    updateLivePreviewMode();
+  } else if (liveImg) {
+    liveImg.removeAttribute('src');
+  }
+
+  if (pageId === 'process') {
+    if (state.activeResultJob) updateComparisonVideoMode();
+  } else {
+    pauseProcessPlaybackStreams();
+  }
 
   if (pageId === 'library') loadLibrary();
   if (pageId === 'process') {
@@ -173,11 +226,49 @@ function updateLivePreviewMode() {
     img.src = `/api/cameras/preview.mjpg?mode=posy_rgb_trail&shift=3&gain=3${stParam}${assistParam}${camViewParam}&t=${Date.now()}`;
   } else if (val === 'posy_peak_hold') {
     img.src = `/api/cameras/preview.mjpg?mode=posy_peak_hold&shift=2&gain=3${stParam}${assistParam}${camViewParam}&t=${Date.now()}`;
+  } else if (val === 'schlieren') {
+    img.src = `/api/cameras/preview.mjpg?mode=schlieren&gain=3${stParam}${assistParam}${camViewParam}&t=${Date.now()}`;
+  } else if (val === 'slit_scan') {
+    img.src = `/api/cameras/preview.mjpg?mode=slit_scan&gain=2${assistParam}${camViewParam}&t=${Date.now()}`;
+  } else if (val === 'slit_scan_h') {
+    img.src = `/api/cameras/preview.mjpg?mode=slit_scan_h&gain=2${assistParam}${camViewParam}&t=${Date.now()}`;
+  } else if (val === 'dvs_events') {
+    img.src = `/api/cameras/preview.mjpg?mode=dvs_events&gain=1.5${stParam}${assistParam}${camViewParam}&t=${Date.now()}`;
   } else if (val === 'stroboscope') {
     const hz = strobeHz > 0 ? strobeHz : 2.5;
     img.src = `/api/cameras/preview.mjpg?mode=stroboscope&strobe_hz=${hz}${assistParam}${camViewParam}&t=${Date.now()}`;
   } else {
     img.src = `/api/cameras/preview.mjpg?mode=normal${stParam}${assistParam}${camViewParam}&t=${Date.now()}`;
+  }
+
+  const ctxBar = document.getElementById('live-mode-context-bar');
+  if (ctxBar) {
+    if (val === 'schlieren') {
+      ctxBar.style.display = 'flex';
+      ctxBar.innerHTML = `
+        <span style="color: var(--text-muted);"><strong>Schlieren Heat &amp; Airflow:</strong> Aim at a patterned backdrop behind heat or airflow, then lock the calm background.</span>
+        <button type="button" class="${state.tareLocked ? 'primary' : ''}" onclick="toggleTareReferenceFrame()">${state.tareLocked ? 'Unlock Background' : 'Lock Background'}</button>
+      `;
+    } else if (val === 'slit_scan' || val === 'slit_scan_h') {
+      ctxBar.style.display = 'flex';
+      ctxBar.innerHTML = `<span style="color: var(--text-muted);"><strong>Live Slit-Scan Time-Ribbon:</strong> Wave objects or aim at spinning fans across the cyan scanline to paint live motion waves.</span>`;
+    } else if (val === 'dvs_events') {
+      ctxBar.style.display = 'flex';
+      ctxBar.innerHTML = `<span style="color: var(--text-muted);"><strong>Neuromorphic DVS Event Emulator:</strong> Only log-brightness increases (Cyan <strong>+ON</strong>) and drops (Coral <strong>-OFF</strong>) fire spikes, suppressing static scenes completely.</span>`;
+    } else if (val === 'stroboscope') {
+      const hz = strobeHz > 0 ? strobeHz : 2.5;
+      ctxBar.style.display = 'flex';
+      ctxBar.innerHTML = `
+        <span style="color: var(--text-muted);"><strong>Digital Stroboscope:</strong> Tune Strobe Hz near the object's frequency to freeze periodic motion.</span>
+        <label style="margin: 0; font-size: 0.78rem;">Strobe Hz: <input type="number" step="0.5" min="0.5" max="60" value="${hz}" style="width: 70px;" onchange="document.getElementById('live-strobe-hz').value = this.value; updateLivePreviewMode();" /></label>
+      `;
+    } else if (val.startsWith('posy_')) {
+      ctxBar.style.display = 'flex';
+      ctxBar.innerHTML = `<span style="color: var(--text-muted);"><strong>Posy Live Extraction:</strong> Keep the camera steady — stationary pixels vanish so only pure motion &amp; rainbow trails remain.</span>`;
+    } else {
+      ctxBar.style.display = 'none';
+      ctxBar.innerHTML = '';
+    }
   }
 }
 
@@ -314,6 +405,24 @@ function onResolutionDimensionChange() {
     }
   }
   runPreflight();
+}
+
+function applyCaptureQuickPreset(widthPx, heightPx, fps, exposureUs) {
+  const wEl = document.getElementById('rec-width');
+  const hEl = document.getElementById('rec-height');
+  const fpsEl = document.getElementById('rec-fps');
+  const expEl = document.getElementById('ctrl-exposure');
+  if (wEl) wEl.value = String(widthPx);
+  if (hEl) hEl.value = String(heightPx);
+  if (fpsEl) fpsEl.value = String(fps);
+  if (expEl) {
+    const maxSafeExp = Math.max(500, Math.floor(900000 / Math.max(fps, 1)));
+    expEl.value = String(Math.min(exposureUs || maxSafeExp, maxSafeExp));
+  }
+  onResolutionDimensionChange();
+  state.userEditedMaxHz = false;
+  onTargetFpsChange();
+  pulseHighlightElements([wEl, hEl, fpsEl]);
 }
 
 function clearRoiInputs() {
@@ -539,12 +648,17 @@ async function initCameras() {
     updateThermalBadge(data.hardware);
     const hwBadge = document.getElementById('hw-model-badge');
     if (hwBadge) {
-      hwBadge.textContent = `${data.hardware.model} (${data.hardware.total_ram_gb} GB RAM)`;
-      hwBadge.title = `Detected ${data.hardware.model} with ${data.hardware.cpu_count} cores and ${data.hardware.total_ram_gb} GB total RAM (${data.hardware.available_ram_gb} GB free).`;
+      const tierTag = (data.hardware.performance_tier || 'balanced').toUpperCase();
+      hwBadge.textContent = `${data.hardware.model} (${data.hardware.total_ram_gb} GB RAM • ${tierTag})`;
+      hwBadge.title = `Detected ${data.hardware.model} with ${data.hardware.cpu_count} cores, ${data.hardware.total_ram_gb} GB total RAM (${data.hardware.available_ram_gb} GB free), Tier: ${tierTag} (Max Width: ${data.hardware.recommended_max_width}px).`;
     }
     const maxWSelect = document.getElementById('proc-max-width');
     if (maxWSelect && data.hardware.recommended_max_width) {
       maxWSelect.value = String(data.hardware.recommended_max_width);
+    }
+    const pyrInput = document.getElementById('proc-levels');
+    if (pyrInput && data.hardware.recommended_pyramid_levels) {
+      pyrInput.value = String(data.hardware.recommended_pyramid_levels);
     }
   }
 
@@ -794,15 +908,16 @@ async function clearRulerCalibration() {
 function toggleMotionTrigger() {
   state.triggerArmed = !state.triggerArmed;
   const btn = document.getElementById('btn-arm-trigger');
-  const badge = document.getElementById('trigger-status-badge');
+  const badge = document.getElementById('trig-status-badge');
+  const prerollS = parseNumOr(document.getElementById('trig-preroll-s'), 2.0);
   if (btn) {
     btn.textContent = state.triggerArmed ? 'Disarm Trigger (Armed & Listening...)' : 'Arm Motion Trigger';
     btn.className = state.triggerArmed ? 'primary' : '';
   }
   if (badge) {
     badge.textContent = state.triggerArmed
-      ? 'Armed: Monitoring Live ROI for Spike (2.0s Pre-Roll Ready)'
-      : 'Disarmed (Pre-Roll Buffer Active)';
+      ? `Armed: Monitoring Live ROI for Spike (${prerollS}s Pre-Roll Ready)`
+      : `Disarmed (${prerollS}s Pre-Roll Ready)`;
     badge.className = state.triggerArmed ? 'badge global' : 'badge';
   }
 }
@@ -854,19 +969,18 @@ async function saveCameraSetup() {
   });
   closeSetupModal();
   await initCameras();
-  updateLivePreviewMode();
   await runPreflight();
 }
 
 async function lockCameraControls() {
   const payload = {
-    width: parseInt(document.getElementById('rec-width').value, 10) || 640,
-    height: parseInt(document.getElementById('rec-height').value, 10) || 480,
-    fps: parseInt(document.getElementById('rec-fps').value, 10) || 30,
-    exposure_us: parseInt(document.getElementById('ctrl-exposure').value, 10) || 10000,
-    gain: parseFloat(document.getElementById('ctrl-gain').value) || 1.0,
-    wb_temp_k: parseInt(document.getElementById('ctrl-wb').value, 10) || 4600,
-    focus_position: parseFloat(document.getElementById('ctrl-focus').value) || 0.0,
+    width: parseIntOr(document.getElementById('rec-width'), 640),
+    height: parseIntOr(document.getElementById('rec-height'), 480),
+    fps: parseIntOr(document.getElementById('rec-fps'), 30),
+    exposure_us: parseIntOr(document.getElementById('ctrl-exposure'), 10000),
+    gain: parseNumOr(document.getElementById('ctrl-gain'), 1.0),
+    wb_temp_k: parseIntOr(document.getElementById('ctrl-wb'), 4600),
+    focus_position: parseNumOr(document.getElementById('ctrl-focus'), 0.0),
     roi: getOptionalRoi(),
   };
   const res = await api('/api/cameras/lock', {
@@ -876,6 +990,8 @@ async function lockCameraControls() {
   document.getElementById('ctrl-exposure').value = res.controls.exposure_us;
   document.getElementById('ctrl-gain').value = res.controls.gain;
   document.getElementById('ctrl-wb').value = res.controls.wb_temp_k;
+  const manualDrawer = document.getElementById('cam-manual-controls-drawer');
+  if (manualDrawer) manualDrawer.open = true;
   const lockBadge = document.getElementById('lock-status-badge');
   lockBadge.textContent = `Locked (${res.controls.exposure_us} us, Gain ${res.controls.gain})`;
   lockBadge.className = 'badge global';
@@ -935,34 +1051,83 @@ async function runPreflight() {
   banner.innerHTML = html;
 }
 
+async function stopRecordingEarly() {
+  const stopBtn = document.getElementById('btn-stop-record');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Stopping & Saving...';
+  }
+  try {
+    await api('/api/record/stop', { method: 'POST' });
+  } catch (_e) {
+    // Ignore if capture already finished
+  }
+}
+
 async function startRecording(options = {}) {
   const btn = document.getElementById('btn-record');
   const resBanner = document.getElementById('record-result-banner');
+  const progWrap = document.getElementById('record-progress-wrap');
+  const progFill = document.getElementById('record-progress-fill');
+  const progText = document.getElementById('record-progress-text');
+  const stopBtn = document.getElementById('btn-stop-record');
   if (state.triggerRecordingInFlight) return;
   state.triggerRecordingInFlight = true;
   btn.disabled = true;
-  const includePreroll = Boolean(options.includePreroll);
-  btn.textContent = includePreroll
-    ? 'Auto-Triggered! Prepending 2.0s pre-roll & recording...'
-    : 'Recording in progress (controls locked)...';
   resBanner.style.display = 'none';
 
+  const includePreroll = Boolean(options.includePreroll);
+  const prerollSec = options.prerollSeconds || parseNumOr(document.getElementById('trig-preroll-s'), 2.0);
+  const delayEl = document.getElementById('rec-countdown-s');
+  const delayS = !includePreroll && delayEl ? Math.max(0, parseIntOr(delayEl, 0)) : 0;
+
+  let statusPoll = null;
   try {
+    for (let rem = delayS; rem > 0; rem--) {
+      btn.textContent = `Starting in ${rem}s (Hands off mount)...`;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    btn.textContent = includePreroll
+      ? `Auto-Triggered! Prepending ${prerollSec}s pre-roll & recording...`
+      : 'Recording in progress (controls locked)...';
+
+    if (progWrap) progWrap.style.display = 'block';
+    if (progFill) progFill.style.width = '0%';
+    if (progText) progText.textContent = 'Capturing frames... 0%';
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      stopBtn.textContent = 'Stop & Save Early';
+    }
+
+    statusPoll = setInterval(async () => {
+      try {
+        const st = await api('/api/record/status');
+        if (st && st.is_recording) {
+          const pct = Math.min(100, Math.max(0, Math.round((st.progress || 0) * 100)));
+          if (progFill) progFill.style.width = `${pct}%`;
+          if (progText) progText.textContent = `Capturing frames... ${pct}%`;
+        }
+      } catch (_err) {
+        // Ignore transient status poll errors
+      }
+    }, 350);
+
     const payload = {
       title: document.getElementById('rec-title').value || formatDefaultClipTitle(),
-      duration_s: parseFloat(document.getElementById('rec-duration').value) || 8.0,
-      width: parseInt(document.getElementById('rec-width').value, 10) || 640,
-      height: parseInt(document.getElementById('rec-height').value, 10) || 480,
-      fps: parseInt(document.getElementById('rec-fps').value, 10) || 30,
+      duration_s: parseNumOr(document.getElementById('rec-duration'), 8.0),
+      width: parseIntOr(document.getElementById('rec-width'), 640),
+      height: parseIntOr(document.getElementById('rec-height'), 480),
+      fps: parseIntOr(document.getElementById('rec-fps'), 30),
       storage_format: document.getElementById('rec-format').value,
       roi: getOptionalRoi(),
       include_preroll: includePreroll,
-      preroll_seconds: options.prerollSeconds || 2.0,
+      preroll_seconds: prerollSec,
       controls: {
-        exposure_us: parseInt(document.getElementById('ctrl-exposure').value, 10) || 10000,
-        gain: parseFloat(document.getElementById('ctrl-gain').value) || 1.0,
-        wb_temp_k: parseInt(document.getElementById('ctrl-wb').value, 10) || 4600,
-        focus_position: parseFloat(document.getElementById('ctrl-focus').value) || 0.0,
+        exposure_us: parseIntOr(document.getElementById('ctrl-exposure'), 10000),
+        gain: parseNumOr(document.getElementById('ctrl-gain'), 1.0),
+        wb_temp_k: parseIntOr(document.getElementById('ctrl-wb'), 4600),
+        focus_position: parseNumOr(document.getElementById('ctrl-focus'), 0.0),
       },
     };
     const meta = await api('/api/record/start', {
@@ -984,7 +1149,7 @@ async function startRecording(options = {}) {
     resBanner.innerHTML = `
       <strong>Clip Recorded:</strong> ${meta.title} (${meta.clip_id}) &bull; <strong>${meta.width}&times;${meta.height} px</strong><br/>
       Achieved Sample Rate: <strong>${meta.achieved_fps} FPS</strong> (Target ${meta.target_fps} FPS, Jitter &sigma; = ${meta.jitter_std_ms} ms) &bull;
-      Frames: ${meta.frame_count} &bull;
+      Frames: ${meta.frame_count} (${meta.duration_s}s) &bull;
       <a href="#" style="color: var(--accent);" onclick="openClipInProcess('${meta.clip_id}'); return false;">Process This Clip &rarr;</a>
     `;
     refreshDefaultClipTitleIfUnedited();
@@ -994,18 +1159,21 @@ async function startRecording(options = {}) {
     resBanner.className = 'banner danger';
     resBanner.textContent = `Recording failed: ${err.message}`;
   } finally {
+    if (statusPoll) clearInterval(statusPoll);
+    if (progWrap) progWrap.style.display = 'none';
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      stopBtn.textContent = 'Stop & Save Early';
+    }
     state.triggerRecordingInFlight = false;
     btn.disabled = false;
-    btn.textContent = '2. Record Lossless Clip';
+    btn.textContent = 'Record Lossless Clip';
   }
 }
 
 function openClipInProcess(clipId) {
+  state.pendingProcessClipId = clipId;
   switchPage('process');
-  loadLibrary().then(() => {
-    document.getElementById('proc-clip').value = clipId;
-    onSelectProcessClip();
-  });
 }
 
 async function initPresetsAndMethods() {
@@ -1064,6 +1232,15 @@ async function loadLibrary() {
 
   if (state.clips.length === 0) {
     grid.innerHTML = '<p style="color: var(--text-muted);">No recordings yet. Go to 1. Record to capture a lossless clip.</p>';
+    const compWrap = document.getElementById('comparison-table-wrap');
+    if (compWrap) {
+      compWrap.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Select a clip to compare methods.</p>';
+    }
+    const estBanner = document.getElementById('job-estimate-banner');
+    if (estBanner) {
+      estBanner.className = 'banner';
+      estBanner.textContent = 'Record or generate a demo clip to see offline processing estimates.';
+    }
     return;
   }
 
@@ -1078,29 +1255,54 @@ async function loadLibrary() {
     card.style.marginBottom = '0';
     const mb = (c.file_size_bytes / (1024 * 1024)).toFixed(2);
     const jobCount = (c.jobs || []).length;
+    const thumbVer = encodeURIComponent(c.file_size_bytes || c.frame_count || 0);
     const dualBadge = c.dual_camera
       ? `<span class="badge global" title="Synchronized Dual-Camera Clip (${c.sync_mode || 'software'} sync)">DUAL CAM (A+B)</span>`
       : '';
     const dualMetaLine = c.dual_camera
-      ? `<br/><span style="color: var(--accent);">Sync: <strong>${(c.sync_mode || 'software').toUpperCase()}</strong> (&Delta;t ${c.sync_dt_mean_ms || 0} ms) &bull; Cam B: ${c.secondary_camera_id || 'Cam B'}</span>`
+      ? `<br/><span style="color: var(--accent);">Sync: <strong>${(c.sync_mode || 'software').toUpperCase()}</strong> (&Delta;t ${c.sync_dt_mean_ms || 0} ms) &bull; Cam B: ${escFrontierHtml(c.secondary_camera_id || 'Cam B')}</span>`
+      : '';
+    const safeTitle = escFrontierHtml(c.title);
+    const safeNotes = escFrontierHtml(c.notes || '');
+    const notesBlock = safeNotes
+      ? `<p class="clip-notes-text">${safeNotes}</p>`
       : '';
     card.innerHTML = `
       <div class="video-box" style="margin-bottom: 0.75rem;">
-        <img src="/api/library/${c.clip_id}/files/thumb.jpg" alt="${c.title}" />
+        <img src="/api/library/${c.clip_id}/files/thumb.jpg?t=${thumbVer}" alt="${safeTitle}" />
       </div>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; gap: 0.35rem; flex-wrap: wrap;">
-        <strong>${c.title}</strong>
+        <strong>${safeTitle}</strong>
         <div style="display: flex; gap: 0.3rem; align-items: center;">
           ${dualBadge}
           <span class="badge ${c.shutter_type}">${c.shutter_type}</span>
         </div>
       </div>
-      <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+      <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.65rem;">
         ${c.width}&times;${c.height} &bull; Achieved <strong>${c.achieved_fps} FPS</strong> (Jitter ${c.jitter_std_ms || 0} ms)<br/>
         ${c.frame_count} frames (${c.duration_s}s) &bull; ${mb} MB &bull; ${jobCount} processed run(s)${dualMetaLine}
       </p>
+      ${notesBlock}
+      <div id="clip-edit-${c.clip_id}" class="clip-inline-edit">
+        <label style="margin: 0; font-size: 0.76rem;">
+          Clip Title
+          <input id="clip-edit-title-${c.clip_id}" type="text" maxlength="160" value="${safeTitle}" />
+        </label>
+        <label style="margin: 0; font-size: 0.76rem;">
+          Notes / Setup (Mount, Fan Speed, Distance)
+          <input id="clip-edit-notes-${c.clip_id}" type="text" maxlength="1000" placeholder="Optional experiment notes..." value="${safeNotes}" />
+        </label>
+        <div style="display: flex; gap: 0.45rem; justify-content: flex-end;">
+          <button type="button" onclick="toggleClipEdit('${c.clip_id}', false)">Cancel</button>
+          <button type="button" class="primary" onclick="saveClipMetadata('${c.clip_id}')">Save</button>
+        </div>
+      </div>
       <div style="display: flex; gap: 0.45rem; flex-wrap: wrap;">
         <button class="primary" onclick="openClipInProcess('${c.clip_id}')">Process / Compare</button>
+        <button type="button" onclick="openStillsModal('${c.clip_id}')" title="Create Rainbow Motion Painting, Stroboscopic Sequence, or Crowd Eraser PNG">&#127912; Stills</button>
+        <button type="button" onclick="openFrontierModal('${c.clip_id}')" title="Inspect hidden vibrations, airflow swirls, material flex, or light flicker">&#128269; Deep Inspect</button>
+        <button type="button" onclick="openTrimModal('${c.clip_id}')" title="Open Android-style timeline cutter to trim start/end spikes">&#9986; Trim / Cut</button>
+        <button type="button" onclick="toggleClipEdit('${c.clip_id}')" title="Rename clip or add setup notes">&#9998; Rename / Notes</button>
         <a class="btn" href="/api/library/${c.clip_id}/files/preview.mp4" download="${c.clip_id}.mp4">MP4</a>
         <button class="danger" onclick="deleteClip('${c.clip_id}')">Delete</button>
       </div>
@@ -1108,15 +1310,695 @@ async function loadLibrary() {
     grid.appendChild(card);
   });
 
-  if (currentSelected && state.clips.some((c) => c.clip_id === currentSelected)) {
-    procSelect.value = currentSelected;
+  const preferredClip = state.pendingProcessClipId || currentSelected;
+  state.pendingProcessClipId = null;
+  if (preferredClip && state.clips.some((c) => c.clip_id === preferredClip)) {
+    procSelect.value = preferredClip;
   }
   onSelectProcessClip();
 }
 
+function toggleClipEdit(clipId, forceOpen) {
+  const box = document.getElementById(`clip-edit-${clipId}`);
+  if (!box) return;
+  const open = forceOpen !== undefined ? Boolean(forceOpen) : !box.classList.contains('open');
+  box.classList.toggle('open', open);
+  if (open) {
+    const titleEl = document.getElementById(`clip-edit-title-${clipId}`);
+    if (titleEl) titleEl.focus();
+  }
+}
+
+async function saveClipMetadata(clipId) {
+  const titleEl = document.getElementById(`clip-edit-title-${clipId}`);
+  const notesEl = document.getElementById(`clip-edit-notes-${clipId}`);
+  const title = titleEl ? titleEl.value.trim() : '';
+  const notes = notesEl ? notesEl.value.trim() : '';
+  if (!title) {
+    alert('Clip title cannot be empty.');
+    return;
+  }
+  await api(`/api/library/${encodeURIComponent(clipId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title, notes }),
+  });
+  await loadLibrary();
+}
+
 async function deleteClip(clipId) {
+  const clip = state.clips.find((c) => c.clip_id === clipId);
+  const label = clip ? `"${clip.title}"` : clipId;
+  if (!window.confirm(`Permanently delete clip ${label} and all of its processed jobs?`)) {
+    return;
+  }
   await api(`/api/library/${clipId}`, { method: 'DELETE' });
   await loadLibrary();
+  await loadJobs();
+}
+
+function openTrimModal(clipId) {
+  const clip = state.clips.find((c) => c.clip_id === clipId);
+  if (!clip) return;
+  const dur = Math.max(0.5, parseFloat(clip.duration_s) || 5.0);
+  const fps = parseFloat(clip.achieved_fps) || 30.0;
+  state.trimModal = {
+    clipId: clip.clip_id,
+    title: clip.title,
+    durationS: dur,
+    fps,
+    startS: 0.0,
+    endS: dur,
+    dragging: null,
+  };
+
+  const sub = document.getElementById('trim-clip-subtitle');
+  if (sub) {
+    sub.textContent = `Clip: "${clip.title}" (${clip.width}x${clip.height} @ ${fps} FPS, ${dur}s total). Drag the left and right pointers to cut start/stop spikes.`;
+  }
+  const msg = document.getElementById('trim-status-msg');
+  if (msg) msg.style.display = 'none';
+
+  const vid = document.getElementById('trim-video-player');
+  if (vid) {
+    vid.src = `/api/library/${encodeURIComponent(clip.clip_id)}/files/preview.mp4?t=${Date.now()}`;
+    vid.currentTime = 0;
+  }
+
+  updateTrimTimelineUI();
+  const modal = document.getElementById('trim-modal');
+  if (modal) modal.classList.add('open');
+}
+
+function closeTrimModal() {
+  const vid = document.getElementById('trim-video-player');
+  if (vid) {
+    vid.pause();
+    vid.removeAttribute('src');
+  }
+  const modal = document.getElementById('trim-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function updateTrimTimelineUI() {
+  const tm = state.trimModal;
+  if (!tm) return;
+  const dur = Math.max(0.1, tm.durationS);
+  const startPct = Math.max(0, Math.min(100, (tm.startS / dur) * 100));
+  const endPct = Math.max(startPct, Math.min(100, (tm.endS / dur) * 100));
+  const keptS = Math.max(0, tm.endS - tm.startS);
+  const keptFrames = Math.max(1, Math.round(keptS * tm.fps));
+
+  const cutL = document.getElementById('trim-cut-left');
+  const cutR = document.getElementById('trim-cut-right');
+  const actWin = document.getElementById('trim-active-window');
+  const hStart = document.getElementById('trim-handle-start');
+  const hEnd = document.getElementById('trim-handle-end');
+  if (cutL) cutL.style.width = `${startPct.toFixed(2)}%`;
+  if (cutR) cutR.style.width = `${(100 - endPct).toFixed(2)}%`;
+  if (actWin) {
+    actWin.style.left = `${startPct.toFixed(2)}%`;
+    actWin.style.width = `${Math.max(0, endPct - startPct).toFixed(2)}%`;
+  }
+  if (hStart) hStart.style.left = `${startPct.toFixed(2)}%`;
+  if (hEnd) hEnd.style.left = `${endPct.toFixed(2)}%`;
+
+  const bStart = document.getElementById('trim-start-badge');
+  const bEnd = document.getElementById('trim-end-badge');
+  const bKept = document.getElementById('trim-kept-badge');
+  if (bStart) bStart.textContent = `Start: ${tm.startS.toFixed(2)} s`;
+  if (bEnd) bEnd.textContent = `End: ${tm.endS.toFixed(2)} s (-${Math.max(0, dur - tm.endS).toFixed(2)} s tail)`;
+  if (bKept) bKept.textContent = `Kept: ${keptS.toFixed(2)} s (~${keptFrames} frames)`;
+}
+
+function applyQuickSpikeTrim(cutSec) {
+  const tm = state.trimModal;
+  if (!tm) return;
+  const maxCut = Math.max(0, (tm.durationS - 0.5) * 0.45);
+  const eff = Math.min(cutSec, maxCut);
+  tm.startS = Number(eff.toFixed(2));
+  tm.endS = Number((tm.durationS - eff).toFixed(2));
+  const vid = document.getElementById('trim-video-player');
+  if (vid) vid.currentTime = tm.startS;
+  updateTrimTimelineUI();
+}
+
+function resetTrimHandles() {
+  const tm = state.trimModal;
+  if (!tm) return;
+  tm.startS = 0.0;
+  tm.endS = tm.durationS;
+  const vid = document.getElementById('trim-video-player');
+  if (vid) vid.currentTime = 0.0;
+  updateTrimTimelineUI();
+}
+
+function previewTrimSelection() {
+  const tm = state.trimModal;
+  const vid = document.getElementById('trim-video-player');
+  if (!tm || !vid) return;
+  vid.currentTime = tm.startS;
+  vid.play().catch(() => {});
+}
+
+function applyTrimToProcessTab() {
+  const tm = state.trimModal;
+  if (!tm) return;
+  const tailCutS = Math.max(0.0, Number((tm.durationS - tm.endS).toFixed(2)));
+  const startCutS = Math.max(0.0, Number(tm.startS.toFixed(2)));
+  closeTrimModal();
+  openClipInProcess(tm.clipId);
+  const drawer = document.getElementById('proc-adv-drawer');
+  if (drawer) drawer.open = true;
+  const startEl = document.getElementById('proc-trim-start');
+  const endEl = document.getElementById('proc-trim-end');
+  if (startEl) startEl.value = String(startCutS);
+  if (endEl) endEl.value = String(tailCutS);
+  pulseHighlightElements([startEl, endEl]);
+}
+
+function openStillsModal(clipId) {
+  const clip = state.clips.find((c) => c.clip_id === clipId);
+  if (!clip) return;
+  state.stillsModal = {
+    clipId: clip.clip_id,
+    title: clip.title,
+    style: (state.stillsModal && state.stillsModal.style) || 'chrono_paint',
+  };
+  const sub = document.getElementById('stills-clip-subtitle');
+  if (sub) {
+    sub.textContent = `Clip: "${clip.title}" (${clip.width}x${clip.height}, ${clip.frame_count} frames). Choose a Motion Still style below.`;
+  }
+  selectStillStyle(state.stillsModal.style);
+  const modal = document.getElementById('stills-modal');
+  if (modal) modal.classList.add('open');
+}
+
+function closeStillsModal() {
+  const img = document.getElementById('still-preview-img');
+  if (img) img.removeAttribute('src');
+  const modal = document.getElementById('stills-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function selectStillStyle(style) {
+  if (!state.stillsModal) return;
+  state.stillsModal.style = style || 'chrono_paint';
+  ['chrono_paint', 'strobe_ghost', 'median_bg', 'motion_trails'].forEach((s) => {
+    const btn = document.getElementById(`still-btn-${s}`);
+    if (btn) btn.classList.toggle('active', s === state.stillsModal.style);
+  });
+  const strobeWrap = document.getElementById('still-strobe-count-wrap');
+  if (strobeWrap) {
+    strobeWrap.style.display = state.stillsModal.style === 'strobe_ghost' ? 'inline-flex' : 'none';
+  }
+  renderStillPreview();
+}
+
+function renderStillPreview() {
+  const sm = state.stillsModal;
+  if (!sm) return;
+  const sens = parseNumOr(document.getElementById('still-sensitivity'), 1.0);
+  const strobeN = parseIntOr(document.getElementById('still-strobe-count'), 8);
+  const baseUrl = `/api/library/${encodeURIComponent(sm.clipId)}/still?style=${encodeURIComponent(sm.style)}&sensitivity=${sens}&strobe_count=${strobeN}`;
+
+  const statusEl = document.getElementById('still-status-text');
+  if (statusEl) statusEl.textContent = 'Rendering composite PNG...';
+  const img = document.getElementById('still-preview-img');
+  if (img) {
+    img.onload = () => {
+      if (statusEl) statusEl.textContent = 'Ready';
+    };
+    img.onerror = () => {
+      if (statusEl) statusEl.textContent = 'Render failed';
+    };
+    img.src = `${baseUrl}&t=${Date.now()}`;
+  }
+  const dlBtn = document.getElementById('btn-download-still');
+  if (dlBtn) {
+    dlBtn.href = `${baseUrl}&download=true`;
+    dlBtn.download = `${sm.clipId}_${sm.style}.png`;
+  }
+}
+
+function escFrontierHtml(str) {
+  return String(str ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+const DEEP_INSPECTOR_META = {
+  dmd: {
+    title: '1. Auto-Find Vibrations',
+    runLabel: '&#9654; Run Auto-Find Vibrations',
+    what: 'Automatically discovers every hidden shake or wobble frequency in the clip without guessing Hz cutoffs first.',
+    bestFor: 'Motors, fans, drones, wobbling brackets, or checking whether parts shake in-phase vs. opposite.',
+    outputs: 'Top Hz/BPM frequencies + oscillation heatmaps + 1-click Magnify Frequency shortcut.',
+  },
+  fluid: {
+    title: '2. Airflow & Swirl Map',
+    runLabel: '&#9654; Run Airflow & Swirl Map',
+    what: 'Tracks pixel motion vectors across sampled frames to paint smooth streamlines and swirling clockwise/CCW vortices.',
+    bestFor: 'Smoke plumes, candle heat waves, steam, flowing water, or Schlieren air currents.',
+    outputs: 'Streamline vorticity map (blue CW vs. orange CCW spin + white arrows) + speed heatmap.',
+  },
+  strain: {
+    title: '3. Flex & Stress Map',
+    runLabel: '&#9654; Run Flex & Stress Map',
+    what: 'Compares calm start frames against peak movement to map where an object bends, stretches, or squeezes.',
+    bestFor: 'Bending rulers, flexing brackets, 3D-printed parts under load, or flapping surfaces.',
+    outputs: 'Peak flex stress heatmap (% strain + crosshair at max stress) + stretch vs. squeeze map.',
+  },
+  rolling: {
+    title: '4. Light Flicker & Sound',
+    runLabel: '&#9654; Run Light Flicker & Sound',
+    what: 'Scans horizontal rolling-shutter banding to uncover fast LED PWM flicker or acoustic vibrations up to 12 kHz.',
+    bestFor: 'LED strips, bulbs, monitor backlights, fluorescent tubes, or vibrating speakers (rolling-shutter cameras).',
+    outputs: 'Measured high-frequency Hz peak + banding stripes + downloadable 16 kHz PCM .WAV audio.',
+  },
+};
+
+function abortFrontierRun() {
+  const fm = state.frontierModal;
+  if (!fm) return;
+  if (fm.timerId) {
+    clearInterval(fm.timerId);
+    fm.timerId = null;
+  }
+  if (fm.abortCtrl) {
+    fm.abortCtrl.abort();
+    fm.abortCtrl = null;
+  }
+}
+
+function cancelFrontierRun() {
+  abortFrontierRun();
+  const statusEl = document.getElementById('frontier-status-text');
+  if (statusEl) statusEl.textContent = 'Cancelled';
+  renderFrontierTabState();
+}
+
+function openFrontierModal(clipId, initialTab = 'dmd') {
+  abortFrontierRun();
+  const clip = state.clips.find((c) => c.clip_id === clipId);
+  const title = clip ? clip.title : clipId;
+  state.frontierModal = {
+    clipId,
+    title,
+    tab: initialTab || 'dmd',
+    cache: {},
+    readoutMs: 16,
+    abortCtrl: null,
+    timerId: null,
+  };
+  const sub = document.getElementById('frontier-clip-subtitle');
+  if (sub) {
+    const metaStr = clip ? ` (${clip.width}x${clip.height} @ ${clip.achieved_fps} FPS, ${clip.frame_count} frames)` : '';
+    sub.textContent = `Clip: "${title}"${metaStr}. Pick an inspector tab below, read what it extracts, then click Run.`;
+  }
+  const modal = document.getElementById('frontier-modal');
+  if (modal) modal.classList.add('open');
+  selectFrontierTab(state.frontierModal.tab);
+}
+
+function openFrontierForSelectedJob() {
+  const jobId = document.getElementById('analysis-job-select')?.value;
+  const job = state.jobs.find((j) => j.job_id === jobId) || state.activeResultJob;
+  const clipId = job ? job.clip_id : state.clips[0]?.clip_id;
+  if (!clipId) {
+    alert('Record, upload, or generate a demo clip first to open Clip Deep Inspector.');
+    return;
+  }
+  openFrontierModal(clipId, 'dmd');
+}
+
+function closeFrontierModal() {
+  abortFrontierRun();
+  const modal = document.getElementById('frontier-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function selectFrontierTab(tab) {
+  if (!state.frontierModal) return;
+  abortFrontierRun();
+  state.frontierModal.tab = tab || 'dmd';
+  ['dmd', 'fluid', 'strain', 'rolling'].forEach((t) => {
+    const btn = document.getElementById(`frontier-tab-${t}`);
+    if (btn) btn.classList.toggle('active', t === state.frontierModal.tab);
+  });
+  renderFrontierTabState();
+}
+
+function magnifyDmdMode(clipId, lowHz, highHz) {
+  closeFrontierModal();
+  const presetSel = document.getElementById('proc-preset');
+  if (presetSel) presetSel.value = 'custom';
+  const lowEl = document.getElementById('proc-low-hz');
+  const highEl = document.getElementById('proc-high-hz');
+  if (lowEl) lowEl.value = String(lowHz);
+  if (highEl) highEl.value = String(highHz);
+  openClipInProcess(clipId);
+  pulseHighlightElements([lowEl, highEl]);
+}
+
+function getFrontierCacheKey(fm) {
+  if (!fm) return '';
+  return fm.tab === 'rolling' ? `rolling:${fm.readoutMs || 16}` : fm.tab;
+}
+
+function renderFrontierImgCard(srcB64, altText, captionHtml, filenameSlug) {
+  const safeName = escFrontierHtml(filenameSlug || 'inspector_map');
+  return `
+    <div class="frontier-img-card">
+      <img src="${srcB64}" alt="${escFrontierHtml(altText)}" />
+      <small>${captionHtml}</small>
+      <a class="btn" href="${srcB64}" download="${safeName}.png" style="margin-top: 0.4rem; font-size: 0.74rem; padding: 0.22rem 0.6rem;">&#11015; Save PNG</a>
+    </div>
+  `;
+}
+
+function renderFrontierTabState() {
+  const fm = state.frontierModal;
+  if (!fm) return;
+  const tab = fm.tab;
+  const meta = DEEP_INSPECTOR_META[tab] || DEEP_INSPECTOR_META.dmd;
+  const statusEl = document.getElementById('frontier-status-text');
+  const bodyEl = document.getElementById('frontier-result-body');
+  if (!bodyEl) return;
+
+  const cacheKey = getFrontierCacheKey(fm);
+  const cached = fm.cache[cacheKey];
+  if (!cached) {
+    if (statusEl) statusEl.textContent = `Ready to run ${meta.title}`;
+    const rollingCfg = tab === 'rolling'
+      ? `<label style="margin: 0; font-size: 0.8rem;">
+           Sensor Readout Window (ms):
+           <input id="frontier-readout-ms" type="number" min="2" max="50" step="1" value="${fm.readoutMs || 16}" style="width: 68px;" oninput="if (state.frontierModal) state.frontierModal.readoutMs = parseNumOr(this, 16);" />
+         </label>`
+      : '';
+    bodyEl.innerHTML = `
+      <div class="inspector-brief-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+          <strong style="font-size: 0.96rem;">${meta.title}</strong>
+          <div style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
+            ${rollingCfg}
+            <button type="button" class="primary" onclick="runActiveFrontierTab()">${meta.runLabel}</button>
+          </div>
+        </div>
+        <div class="inspector-brief-grid">
+          <div><strong>What It Does</strong>${escFrontierHtml(meta.what)}</div>
+          <div><strong>Best For</strong>${escFrontierHtml(meta.bestFor)}</div>
+          <div><strong>What You Will See</strong>${escFrontierHtml(meta.outputs)}</div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const data = cached;
+  if (statusEl) statusEl.textContent = `${meta.title} complete`;
+
+  if (tab === 'dmd') {
+    if (!data.modes || data.modes.length === 0) {
+      bodyEl.innerHTML = `
+        <div class="frontier-summary-banner">
+          <span>${escFrontierHtml(data.summary || 'No clear periodic vibrations found in this clip.')}</span>
+          <button type="button" onclick="runActiveFrontierTab(true)">&#8635; Re-Run</button>
+        </div>`;
+      return;
+    }
+    const modeCards = data.modes.map((m) => `
+      <div class="frontier-mode-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+          <div>
+            <strong>Mode #${m.mode_index}: ${m.freq_hz} Hz</strong>
+            <span style="color: var(--text-muted); font-size: 0.82rem;">(${m.bpm} BPM)</span>
+            <span class="badge">${escFrontierHtml(m.stability_label)} (ζ ${m.damping_pct}%)</span>
+            <span class="badge global">${m.energy_pct}% energy</span>
+          </div>
+          <button type="button" class="primary" onclick="magnifyDmdMode('${escFrontierHtml(fm.clipId)}', ${m.suggested_low_hz}, ${m.suggested_high_hz})">
+            Magnify This Frequency (${m.suggested_low_hz}–${m.suggested_high_hz} Hz)
+          </button>
+        </div>
+        <div class="frontier-img-pair">
+          ${renderFrontierImgCard(m.amp_png_b64, 'Shake Strength Map', `Where ${m.freq_hz} Hz is shaking strongest`, `${fm.clipId}_vib_mode${m.mode_index}_strength`)}
+          ${renderFrontierImgCard(m.phase_png_b64, 'In-Phase vs Opposite Map', 'Cyan (+direction) vs. Coral (-opposite direction)', `${fm.clipId}_vib_mode${m.mode_index}_phase`)}
+        </div>
+      </div>
+    `).join('');
+    bodyEl.innerHTML = `
+      <div class="frontier-summary-banner">
+        <span><strong>Summary:</strong> ${escFrontierHtml(data.summary || `Found ${data.mode_count} vibration frequencies.`)}</span>
+        <button type="button" onclick="runActiveFrontierTab(true)">&#8635; Re-Run</button>
+      </div>
+      ${modeCards}
+    `;
+  } else if (tab === 'fluid') {
+    bodyEl.innerHTML = `
+      <div class="frontier-summary-banner">
+        <span><strong>Summary:</strong> ${escFrontierHtml(data.summary || data.dominant_spin)}</span>
+        <button type="button" onclick="runActiveFrontierTab(true)">&#8635; Re-Run</button>
+      </div>
+      <div class="frontier-kpi-strip">
+        <div class="kpi-box"><div class="kpi-label">Mean Flow Speed</div><div class="kpi-value">${data.mean_speed_px_s} px/s</div></div>
+        <div class="kpi-box"><div class="kpi-label">Peak Flow Speed</div><div class="kpi-value">${data.max_speed_px_s} px/s</div></div>
+        <div class="kpi-box"><div class="kpi-label">Peak Swirl (Vorticity)</div><div class="kpi-value">${data.peak_vorticity_rad_s} rad/s</div></div>
+        <div class="kpi-box"><div class="kpi-label">Turbulence Index</div><div class="kpi-value">${data.turbulence_index}</div></div>
+      </div>
+      <div class="frontier-img-pair">
+        ${renderFrontierImgCard(data.vorticity_lic_png_b64, 'Flow Streamlines & Swirl', 'Streamlines + Swirl (Blue = Clockwise, Orange = CCW)', `${fm.clipId}_airflow_swirl`)}
+        ${renderFrontierImgCard(data.speed_png_b64, 'Flow Speed Map', 'Speed heatmap over flow lines (brighter = faster)', `${fm.clipId}_airflow_speed`)}
+      </div>
+    `;
+  } else if (tab === 'strain') {
+    bodyEl.innerHTML = `
+      <div class="frontier-summary-banner">
+        <span><strong>Summary:</strong> ${escFrontierHtml(data.summary || `Peak flex at t=${data.peak_time_s}s`)}</span>
+        <button type="button" onclick="runActiveFrontierTab(true)">&#8635; Re-Run</button>
+      </div>
+      <div class="frontier-kpi-strip">
+        <div class="kpi-box"><div class="kpi-label">Peak Stress Strain</div><div class="kpi-value">${data.peak_von_mises_pct}%</div></div>
+        <div class="kpi-box"><div class="kpi-label">Peak Microstrain</div><div class="kpi-value">${data.peak_microstrain} με</div></div>
+        <div class="kpi-box"><div class="kpi-label">Stretch / Squeeze</div><div class="kpi-value">+${data.peak_tension_pct}% / -${data.peak_compression_pct}%</div></div>
+        <div class="kpi-box"><div class="kpi-label">Max Flex Move</div><div class="kpi-value">${data.peak_displacement_px} px</div></div>
+      </div>
+      <div class="frontier-img-pair">
+        ${renderFrontierImgCard(data.strain_vm_png_b64, 'Flex & Stress Concentration Map', `Highest bending stress at crosshair (${data.peak_xy[0]}, ${data.peak_xy[1]})`, `${fm.clipId}_stress_map`)}
+        ${renderFrontierImgCard(data.tension_comp_png_b64, 'Stretch vs Squeeze Map', 'Red = Stretching apart | Blue = Squeezing together', `${fm.clipId}_stretch_squeeze`)}
+      </div>
+    `;
+  } else if (tab === 'rolling') {
+    const rMs = fm.readoutMs || 16;
+    const wavUrl = `/api/library/${encodeURIComponent(fm.clipId)}/frontier/rolling-shutter.wav?readout_ms=${encodeURIComponent(rMs)}`;
+    const harmBadges = (data.harmonics || []).map((h) => `<span class="badge">${h.hz} Hz (${h.rel_db} dB)</span>`).join(' ');
+    bodyEl.innerHTML = `
+      <div class="frontier-summary-banner">
+        <span><strong>Summary:</strong> ${escFrontierHtml(data.summary || data.source_hint)}</span>
+        <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+          <label style="margin: 0; font-size: 0.78rem;">
+            Readout (ms):
+            <input id="frontier-readout-ms" type="number" min="2" max="50" step="1" value="${rMs}" style="width: 64px;" oninput="if (state.frontierModal) state.frontierModal.readoutMs = parseNumOr(this, 16);" />
+          </label>
+          <button type="button" onclick="runActiveFrontierTab(true)">&#8635; Re-Run</button>
+          <a id="frontier-download-wav" class="btn primary" href="${wavUrl}" download="${escFrontierHtml(fm.clipId)}_visual_mic.wav">&#11015; Download .WAV Sound</a>
+        </div>
+      </div>
+      <div class="frontier-kpi-strip">
+        <div class="kpi-box"><div class="kpi-label">Strongest Flicker</div><div class="kpi-value">${data.peak_hz} Hz</div></div>
+        <div class="kpi-box"><div class="kpi-label">Signal Clarity (SNR)</div><div class="kpi-value">${data.snr_db} dB</div></div>
+        <div class="kpi-box"><div class="kpi-label">Flicker Strength</div><div class="kpi-value">${data.flicker_depth_pct}%</div></div>
+        <div class="kpi-box"><div class="kpi-label">Scanline Limit</div><div class="kpi-value">${data.nyquist_limit_hz} Hz</div></div>
+      </div>
+      <div style="margin-bottom: 0.65rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;">
+        <strong style="font-size: 0.8rem;">Detected Peaks:</strong>
+        ${harmBadges}
+      </div>
+      ${renderFrontierImgCard(data.rolling_png_b64, 'Scanline Flicker & High-Speed Spectrum', 'Top: Row brightness flicker stripes | Bottom: High-speed frequency spectrum', `${fm.clipId}_flicker_spectrum`)}
+    `;
+  }
+}
+
+async function runActiveFrontierTab(forceRefresh = false) {
+  const fm = state.frontierModal;
+  if (!fm) return;
+  const tab = fm.tab;
+  const meta = DEEP_INSPECTOR_META[tab] || DEEP_INSPECTOR_META.dmd;
+  if (tab === 'rolling') {
+    const rEl = document.getElementById('frontier-readout-ms');
+    if (rEl) fm.readoutMs = parseNumOr(rEl, fm.readoutMs || 16);
+  }
+  const cacheKey = getFrontierCacheKey(fm);
+  if (!forceRefresh && fm.cache[cacheKey]) {
+    renderFrontierTabState();
+    return;
+  }
+
+  abortFrontierRun();
+  const ctrl = new AbortController();
+  fm.abortCtrl = ctrl;
+
+  const statusEl = document.getElementById('frontier-status-text');
+  const bodyEl = document.getElementById('frontier-result-body');
+  const tStart = performance.now();
+  if (statusEl) statusEl.textContent = `Running ${meta.title}...`;
+  if (bodyEl) {
+    bodyEl.innerHTML = `
+      <div class="inspector-loading">
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <span class="bv-spinner"></span>
+          <div>
+            <strong>Streaming sampled frames &amp; running ${meta.title}...</strong>
+            <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.15rem;">
+              Low-RAM frame streaming active — safe for Raspberry Pi 4 &amp; Pi 5. Elapsed: <span id="frontier-elapsed-ms">0.0s</span>
+            </div>
+          </div>
+        </div>
+        <button type="button" onclick="cancelFrontierRun()">Cancel</button>
+      </div>
+    `;
+  }
+
+  fm.timerId = setInterval(() => {
+    const el = document.getElementById('frontier-elapsed-ms');
+    if (el) el.textContent = `${((performance.now() - tStart) / 1000).toFixed(1)}s`;
+  }, 150);
+
+  let endpoint = `/api/library/${encodeURIComponent(fm.clipId)}/frontier/${tab}`;
+  if (tab === 'rolling') {
+    endpoint = `/api/library/${encodeURIComponent(fm.clipId)}/frontier/rolling-shutter?readout_ms=${encodeURIComponent(fm.readoutMs || 16)}`;
+  }
+
+  try {
+    const data = await api(endpoint, { signal: ctrl.signal });
+    if (fm !== state.frontierModal || fm.tab !== tab || ctrl.signal.aborted) return;
+    if (fm.timerId) {
+      clearInterval(fm.timerId);
+      fm.timerId = null;
+    }
+    fm.abortCtrl = null;
+    fm.cache[cacheKey] = data;
+    const durS = ((performance.now() - tStart) / 1000).toFixed(1);
+    if (statusEl) statusEl.textContent = `Completed ${meta.title} in ${durS}s`;
+    renderFrontierTabState();
+  } catch (err) {
+    if (fm.timerId) {
+      clearInterval(fm.timerId);
+      fm.timerId = null;
+    }
+    fm.abortCtrl = null;
+    if (err && err.name === 'AbortError') return;
+    if (statusEl) statusEl.textContent = `${meta.title} failed`;
+    if (bodyEl) {
+      bodyEl.innerHTML = `
+        <div class="banner danger">
+          ${escFrontierHtml(meta.title)} error: ${escFrontierHtml(err.message)}
+          <div style="margin-top: 0.5rem;">
+            <button type="button" onclick="renderFrontierTabState()">Back</button>
+            <button type="button" class="primary" onclick="runActiveFrontierTab(true)">Retry</button>
+          </div>
+        </div>
+      `;
+    }
+  }
+}
+
+async function savePermanentTrim() {
+  const tm = state.trimModal;
+  if (!tm) return;
+  const btn = document.getElementById('btn-save-trimmed-clip');
+  const msg = document.getElementById('trim-status-msg');
+  if (btn) btn.disabled = true;
+  if (msg) {
+    msg.style.display = 'block';
+    msg.textContent = 'Trimming lossless frames, timestamps, and MP4 preview...';
+  }
+  try {
+    const meta = await api(`/api/library/${encodeURIComponent(tm.clipId)}/trim`, {
+      method: 'POST',
+      body: JSON.stringify({ start_s: tm.startS, end_s: tm.endS }),
+    });
+    if (msg) {
+      msg.textContent = `Trimmed "${meta.title}" to ${meta.duration_s}s (${meta.frame_count} frames)!`;
+    }
+    await loadLibrary();
+    setTimeout(() => {
+      closeTrimModal();
+    }, 650);
+  } catch (err) {
+    alert(`Trim failed: ${err.message}`);
+    if (msg) msg.style.display = 'none';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initTrimTimelineDrag() {
+  const track = document.getElementById('trim-track');
+  const vid = document.getElementById('trim-video-player');
+  const playhead = document.getElementById('trim-playhead');
+  if (!track) return;
+
+  if (vid) {
+    vid.addEventListener('timeupdate', () => {
+      const tm = state.trimModal;
+      if (!tm) return;
+      const pct = Math.max(0, Math.min(100, (vid.currentTime / Math.max(0.1, tm.durationS)) * 100));
+      if (playhead) playhead.style.left = `${pct.toFixed(2)}%`;
+      if (!vid.paused && vid.currentTime >= tm.endS) {
+        vid.pause();
+        vid.currentTime = tm.startS;
+      }
+    });
+  }
+
+  const timeFromEvent = (evt) => {
+    const tm = state.trimModal;
+    if (!tm) return 0;
+    const rect = track.getBoundingClientRect();
+    const rel = Math.max(0, Math.min(1, (evt.clientX - rect.left) / Math.max(1, rect.width)));
+    return rel * tm.durationS;
+  };
+
+  track.addEventListener('pointerdown', (evt) => {
+    const tm = state.trimModal;
+    if (!tm) return;
+    evt.preventDefault();
+    const t = timeFromEvent(evt);
+    const distStart = Math.abs(t - tm.startS);
+    const distEnd = Math.abs(t - tm.endS);
+    tm.dragging = distStart <= distEnd ? 'start' : 'end';
+    track.setPointerCapture(evt.pointerId);
+    if (tm.dragging === 'start') {
+      tm.startS = Math.max(0, Math.min(t, tm.endS - 0.25));
+      if (vid) vid.currentTime = tm.startS;
+    } else {
+      tm.endS = Math.min(tm.durationS, Math.max(t, tm.startS + 0.25));
+      if (vid) vid.currentTime = tm.endS;
+    }
+    updateTrimTimelineUI();
+  });
+
+  track.addEventListener('pointermove', (evt) => {
+    const tm = state.trimModal;
+    if (!tm || !tm.dragging) return;
+    const t = timeFromEvent(evt);
+    if (tm.dragging === 'start') {
+      tm.startS = Math.max(0, Math.min(t, tm.endS - 0.25));
+      if (vid) vid.currentTime = tm.startS;
+    } else {
+      tm.endS = Math.min(tm.durationS, Math.max(t, tm.startS + 0.25));
+      if (vid) vid.currentTime = tm.endS;
+    }
+    updateTrimTimelineUI();
+  });
+
+  const endDrag = () => {
+    if (state.trimModal) state.trimModal.dragging = null;
+  };
+  track.addEventListener('pointerup', endDrag);
+  track.addEventListener('pointercancel', endDrag);
 }
 
 function toggleUploadDrawer() {
@@ -1150,7 +2032,7 @@ async function generateDemoShowcaseClips() {
 }
 
 async function uploadExternalClip() {
-  const fileEl = document.getElementById('upload-file-input');
+  const fileEl = document.getElementById('upload-video-file');
   const titleEl = document.getElementById('upload-clip-title');
   const fpsEl = document.getElementById('upload-true-fps');
   const statusEl = document.getElementById('upload-status-text');
@@ -1184,7 +2066,10 @@ async function uploadExternalClip() {
     }
     const meta = await res.json();
     if (statusEl) {
-      statusEl.textContent = `Imported "${meta.title}" (${meta.frame_count} frames @ ${meta.achieved_fps} FPS).`;
+      const truncNote = meta.truncated
+        ? ` (capped at ${meta.max_frames_limit} frames for Pi RAM safety)`
+        : '';
+      statusEl.textContent = `Imported "${meta.title}" (${meta.frame_count} frames @ ${meta.achieved_fps} FPS)${truncNote}.`;
     }
     fileEl.value = '';
     if (titleEl) titleEl.value = '';
@@ -1193,7 +2078,7 @@ async function uploadExternalClip() {
     setTimeout(() => {
       toggleUploadDrawer();
       if (statusEl) statusEl.textContent = '';
-    }, 1100);
+    }, meta.truncated ? 2600 : 1100);
   } catch (err) {
     if (statusEl) statusEl.textContent = `Upload failed: ${err.message}`;
   } finally {
@@ -1224,10 +2109,10 @@ async function updateJobTimeEstimate() {
   const clipId = document.getElementById('proc-clip').value;
   const clip = state.clips.find((c) => c.clip_id === clipId);
   const method = document.getElementById('proc-method').value || 'eulerian';
-  const maxW = parseInt(document.getElementById('proc-max-width').value, 10) || 640;
+  const maxW = parseIntOr(document.getElementById('proc-max-width'), 640);
   const frames = clip ? clip.frame_count : 150;
   const w = clip ? Math.min(clip.width, maxW) : maxW;
-  const h = clip ? clip.height : 480;
+  const h = clip ? Math.max(8, Math.round(clip.height * (w / Math.max(1, clip.width)))) : 480;
 
   const res = await api(`/api/jobs/estimate?frame_count=${frames}&width=${w}&height=${h}&method=${method}`);
   const hwName = state.hardware ? state.hardware.model : 'Raspberry Pi';
@@ -1263,20 +2148,20 @@ async function submitProcessingJob() {
   const params = {
     method: document.getElementById('proc-method').value,
     preset_id: document.getElementById('proc-preset').value,
-    low_hz: parseFloat(document.getElementById('proc-low-hz').value) || 0.8,
-    high_hz: parseFloat(document.getElementById('proc-high-hz').value) || 3.0,
-    alpha: parseFloat(document.getElementById('proc-alpha').value) || 25.0,
-    pyramid_levels: parseInt(document.getElementById('proc-levels').value, 10) || 4,
-    spatial_blur_sigma: parseFloat(document.getElementById('proc-blur').value) || 1.5,
-    max_width: parseInt(document.getElementById('proc-max-width').value, 10) || 640,
+    low_hz: parseNumOr(document.getElementById('proc-low-hz'), 0.8),
+    high_hz: parseNumOr(document.getElementById('proc-high-hz'), 3.0),
+    alpha: parseNumOr(document.getElementById('proc-alpha'), 25.0),
+    pyramid_levels: parseIntOr(document.getElementById('proc-levels'), 4),
+    spatial_blur_sigma: parseNumOr(document.getElementById('proc-blur'), 1.5),
+    max_width: parseIntOr(document.getElementById('proc-max-width'), 640),
     filter_type: document.getElementById('proc-filter').value,
     target_stream: targetStream,
-    chrom_attenuation: chromaEl ? parseFloat(chromaEl.value) || 0.2 : 0.2,
-    heatmap_threshold: heatEl ? parseFloat(heatEl.value) || 0.2 : 0.2,
+    chrom_attenuation: parseNumOr(chromaEl, 0.2),
+    heatmap_threshold: parseNumOr(heatEl, 0.2),
     stabilize_subpixel: Boolean(stabEl && stabEl.checked),
     gate_background_noise: Boolean(bgGateEl && bgGateEl.checked),
-    trim_start_s: trimStartEl ? Math.max(0.0, parseFloat(trimStartEl.value) || 0.0) : 0.0,
-    trim_end_s: trimEndEl ? Math.max(0.0, parseFloat(trimEndEl.value) || 0.0) : 0.0,
+    trim_start_s: Math.max(0.0, parseNumOr(trimStartEl, 0.0)),
+    trim_end_s: Math.max(0.0, parseNumOr(trimEndEl, 0.0)),
   };
   await api('/api/jobs', {
     method: 'POST',
@@ -1293,11 +2178,15 @@ async function cancelJob(jobId) {
 async function loadJobs() {
   const data = await api('/api/jobs');
   state.jobs = data.jobs || [];
+  if (data.hardware_thermal) {
+    updateThermalBadge(data.hardware_thermal);
+  }
 
   const listEl = document.getElementById('jobs-list');
   const analysisSelect = document.getElementById('analysis-job-select');
   const baselineSelect = document.getElementById('analysis-baseline-select');
-  const prevAnalysisJob = analysisSelect.value;
+  const prevAnalysisJob = state.pendingAnalysisJobId || analysisSelect.value;
+  state.pendingAnalysisJobId = null;
   const prevBaselineJob = baselineSelect ? baselineSelect.value : '';
 
   listEl.innerHTML = '';
@@ -1312,13 +2201,17 @@ async function loadJobs() {
     opt.value = j.job_id;
     const hz = j.result ? j.result.dominant_hz : 0;
     const bpm = j.result ? j.result.dominant_bpm : 0;
-    const labelText = `${j.method.toUpperCase()} — ${hz} Hz (${bpm} BPM) [${j.job_id}]`;
+    const clip = state.clips.find((c) => c.clip_id === j.clip_id);
+    const clipLabel = clip ? `${clip.title} — ` : '';
+    const labelText = `${clipLabel}${j.method.toUpperCase()} — ${hz} Hz (${bpm} BPM)`;
     opt.textContent = labelText;
+    opt.title = `Job ${j.job_id} on clip ${j.clip_id}`;
     analysisSelect.appendChild(opt);
     if (baselineSelect) {
       const bOpt = document.createElement('option');
       bOpt.value = j.job_id;
       bOpt.textContent = labelText;
+      bOpt.title = `Job ${j.job_id} on clip ${j.clip_id}`;
       baselineSelect.appendChild(bOpt);
     }
   });
@@ -1632,11 +2525,22 @@ async function loadComparisonForSelectedClip() {
   wrap.innerHTML = html;
 }
 
-function openJobInAnalysis(jobId) {
-  switchPage('analysis');
+async function openJobInAnalysis(jobId) {
+  state.pendingAnalysisJobId = jobId;
+  document.querySelectorAll('.page-section').forEach((el) => el.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach((el) => el.classList.remove('active'));
+  const sec = document.getElementById('page-analysis');
+  if (sec) sec.classList.add('active');
+  const btn = document.querySelector('.nav-tab[data-page="analysis"]');
+  if (btn) btn.classList.add('active');
+  const liveImg = document.getElementById('live-preview-img');
+  if (liveImg) liveImg.removeAttribute('src');
+  pauseProcessPlaybackStreams();
+
+  await loadJobs();
   const sel = document.getElementById('analysis-job-select');
-  sel.value = jobId;
-  loadJobAnalysis();
+  if (sel && jobId) sel.value = jobId;
+  await loadJobAnalysis();
 }
 
 function redrawTimeSeriesPlot() {
@@ -1750,8 +2654,28 @@ function getFftZoomedSeries(spec) {
 }
 
 async function loadJobAnalysis() {
+  const statusBanner = document.getElementById('analysis-status-banner');
   const jobId = document.getElementById('analysis-job-select').value;
-  if (!jobId) return;
+  if (!jobId) {
+    if (statusBanner) {
+      const runningJob = (state.jobs || []).find((j) => j.status === 'running' || j.status === 'queued');
+      statusBanner.style.display = 'block';
+      if (runningJob) {
+        const pct = Math.round((runningJob.progress || 0) * 100);
+        statusBanner.className = 'banner warning';
+        statusBanner.innerHTML = `Processing job <strong>${runningJob.method.toUpperCase()}</strong> is currently running (${pct}%). Spectral analysis will pop up automatically as soon as it finishes.`;
+      } else {
+        statusBanner.className = 'banner warning';
+        statusBanner.innerHTML = `No completed magnification jobs yet. Go to <a href="#" onclick="switchPage('process'); return false;" style="color: var(--accent); text-decoration: underline;">3. Process</a> and click <strong>Run Magnification Job</strong> on a clip first.`;
+      }
+    }
+    return;
+  }
+  if (statusBanner) {
+    statusBanner.style.display = 'block';
+    statusBanner.className = 'banner';
+    statusBanner.textContent = `Loading spectral analysis for ${jobId}...`;
+  }
   const wasPlayingAudio = Boolean(state.audioSource);
   if (wasPlayingAudio) stopRoiSonification();
   state.selectedFftPeakHz = null;
@@ -1765,7 +2689,9 @@ async function loadJobAnalysis() {
 
   const job = state.jobs.find((j) => j.job_id === jobId);
   if (job && job.clip_id) {
-    const thumbUrl = `/api/library/${encodeURIComponent(job.clip_id)}/files/thumb.jpg`;
+    const clip = state.clips.find((c) => c.clip_id === job.clip_id);
+    const thumbVer = clip ? encodeURIComponent(clip.file_size_bytes || clip.frame_count || 0) : Date.now();
+    const thumbUrl = `/api/library/${encodeURIComponent(job.clip_id)}/files/thumb.jpg?t=${thumbVer}`;
     const kymoImg = document.getElementById('kymo-ref-img');
     const dualImg = document.getElementById('dualroi-ref-img');
     if (kymoImg) kymoImg.src = thumbUrl;
@@ -1778,6 +2704,9 @@ async function loadJobAnalysis() {
 
   const spec = await api(`/api/jobs/${jobId}/spectrum`);
   state.currentSpectrum = spec;
+  if (statusBanner) {
+    statusBanner.style.display = 'none';
+  }
   if (wasPlayingAudio) toggleRoiSonification();
 
   document.getElementById('kpi-dom-hz').textContent = `${spec.dominant_hz} Hz`;
@@ -2131,13 +3060,7 @@ async function applySelectedFftPeakToProcess(autoRun = false) {
   }
 
   const runBtn = document.getElementById('btn-submit-job');
-  [lowEl, highEl, runBtn].forEach((el) => {
-    if (!el) return;
-    el.classList.remove('pulse-highlight');
-    void el.offsetWidth;
-    el.classList.add('pulse-highlight');
-    setTimeout(() => el.classList.remove('pulse-highlight'), 3000);
-  });
+  pulseHighlightElements([lowEl, highEl, runBtn]);
 
   if (autoRun) {
     await submitProcessingJob();
@@ -2862,7 +3785,7 @@ function buildSonificationPcmFloat32(spec, sampleRate, modeVal) {
   };
 
   let bufDurationS = durationS;
-  if (modeVal === '10') {
+  if (modeVal === '4' || modeVal === '10') {
     bufDurationS = Math.max(0.75, durationS / 4.0);
   } else if (modeVal === '50') {
     bufDurationS = Math.max(1.5, Math.min(4.0, durationS));
@@ -2887,7 +3810,7 @@ function buildSonificationPcmFloat32(spec, sampleRate, modeVal) {
       phase += (2 * Math.PI * instFreq) / sampleRate;
       const tri = (2.0 / Math.PI) * Math.asin(Math.sin(phase));
       channel[i] = (0.65 * tri + 0.35 * Math.sin(phase)) * gain * env * 0.7;
-    } else if (modeVal === '10') {
+    } else if (modeVal === '4' || modeVal === '10') {
       const normVal = sampleNormAt(i / totalSamples);
       const u = Math.max(0.0, Math.min(1.0, 0.5 * (normVal + 1.0)));
       const instFreq = 200.0 + 320.0 * u;
@@ -3398,7 +4321,8 @@ async function pollLiveRoiSignal() {
         );
       }
       if (data.trigger) {
-        const badge = document.getElementById('trigger-status-badge');
+        const badge = document.getElementById('trig-status-badge');
+        const prerollS = parseNumOr(document.getElementById('trig-preroll-s'), 2.0);
         if (state.triggerArmed && !state.triggerRecordingInFlight) {
           if (data.trigger.triggered) {
             state.triggerArmed = false;
@@ -3408,10 +4332,10 @@ async function pollLiveRoiSignal() {
               btn.className = '';
             }
             if (badge) {
-              badge.textContent = `TRIGGERED! (${data.trigger.current_z_sigma}σ / ${data.trigger.current_pct_jump}% jump) — Capturing with 2s Pre-Roll`;
+              badge.textContent = `TRIGGERED! (${data.trigger.current_z_sigma}σ / ${data.trigger.current_pct_jump}% jump) — Capturing with ${prerollS}s Pre-Roll`;
               badge.className = 'badge danger';
             }
-            startRecording({ includePreroll: true, prerollSeconds: 2.0 });
+            startRecording({ includePreroll: true, prerollSeconds: prerollS });
           } else if (badge) {
             badge.textContent = `Armed (${data.trigger.preroll_frames} pre-roll frames | live ${data.trigger.current_z_sigma}σ, ${data.trigger.current_pct_jump}%)`;
             badge.className = 'badge global';
@@ -3433,6 +4357,13 @@ async function loadSystemStatus() {
     if (hwEl) hwEl.textContent = data.hardware.model;
     const ramEl = document.getElementById('sys-ram-gb');
     if (ramEl) ramEl.textContent = `${data.hardware.total_ram_gb} GB (${data.hardware.available_ram_gb} GB free)`;
+    const tierEl = document.getElementById('sys-tier');
+    if (tierEl) {
+      const tierTag = (data.hardware.performance_tier || 'balanced').toUpperCase();
+      const b = data.hardware.inspector_budgets || {};
+      tierEl.textContent = `${tierTag} (${data.hardware.recommended_max_width}px • ${data.hardware.recommended_pyramid_levels}-lvl)`;
+      tierEl.title = `Motion Still max width: ${b.still_max_width || '—'}px | DMD Vibrations: ${b.dmd_max_dim || '—'}px (${b.dmd_max_frames || '—'} frames) | Flow/Stress: ${b.fluid_max_width || '—'}px`;
+    }
     const tempEl = document.getElementById('sys-cpu-temp');
     if (tempEl && data.hardware.cpu_temp_c !== undefined) {
       tempEl.textContent = `${data.hardware.cpu_temp_c} °C`;
@@ -3450,11 +4381,11 @@ async function loadSystemStatus() {
   document.getElementById('sys-data-dir').textContent = data.data_dir;
 
   const clEl = document.getElementById('sys-changelog');
-  clEl.innerHTML = data.changelog
+  clEl.innerHTML = (data.changelog || [])
     .map(
       (c) =>
-        `<div><strong>v${c.version}</strong> (${c.date})<ul style="padding-left:1.2rem;margin-top:0.25rem;">` +
-        c.notes.map((n) => `<li>${n}</li>`).join('') +
+        `<div style="margin-bottom:0.65rem;"><strong>v${escFrontierHtml(c.version)}</strong> (${escFrontierHtml(c.date)})<ul style="padding-left:1.2rem;margin-top:0.25rem;">` +
+        (c.notes || []).map((n) => `<li>${escFrontierHtml(n)}</li>`).join('') +
         `</ul></div>`
     )
     .join('');
@@ -3463,7 +4394,7 @@ async function loadSystemStatus() {
   logEl.innerHTML = (data.logs || [])
     .slice()
     .reverse()
-    .map((l) => `<div>[${l.timestamp || ''}] <strong>${l.level}</strong>: ${l.message}</div>`)
+    .map((l) => `<div>[${escFrontierHtml(l.timestamp || '')}] <strong>${escFrontierHtml(l.level)}</strong>: ${escFrontierHtml(l.message)}</div>`)
     .join('');
 }
 
@@ -3683,6 +4614,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
   initPreviewRoiDrag();
   initSplitWipeComparator();
+  initTrimTimelineDrag();
   initInteractiveFftCanvas();
   initKymographRefPicker();
   initDualRoiRefPicker();
@@ -3691,11 +4623,26 @@ window.addEventListener('DOMContentLoaded', async () => {
   await runPreflight();
   await loadLibrary();
   setInterval(pollLiveRoiSignal, 1200);
-  setInterval(() => {
+  setInterval(async () => {
     const procPage = document.getElementById('page-process');
+    const anaPage = document.getElementById('page-analysis');
     if (procPage && procPage.classList.contains('active')) {
-      loadJobs();
+      await loadJobs();
+    } else if (anaPage && anaPage.classList.contains('active')) {
+      const hadSelected = Boolean(document.getElementById('analysis-job-select')?.value);
+      const hasActiveJob = (state.jobs || []).some((j) => j.status === 'running' || j.status === 'queued');
+      if (!hadSelected || hasActiveJob) {
+        await loadJobs();
+        await loadJobAnalysis();
+      }
     }
   }, 2500);
+  setInterval(() => {
+    api('/api/system')
+      .then((d) => {
+        if (d && d.hardware) updateThermalBadge(d.hardware);
+      })
+      .catch(() => {});
+  }, 15000);
 });
 

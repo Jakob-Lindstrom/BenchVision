@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,12 +24,28 @@ class Database:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), timeout=10.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA foreign_keys=ON;")
         return conn
 
+    @contextlib.contextmanager
+    def _session(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _init_schema(self) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -90,10 +108,9 @@ class Database:
                     "UPDATE schema_meta SET version = ?, updated_at = ? WHERE id = 1",
                     (SCHEMA_VERSION, now_iso),
                 )
-            conn.commit()
 
     def upsert_recording(self, meta: dict[str, Any]) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO recordings (
@@ -122,40 +139,78 @@ class Database:
                     json.dumps(meta),
                 ),
             )
-            conn.commit()
 
     def list_recordings(self) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             rows = conn.execute(
                 "SELECT meta_json FROM recordings ORDER BY created_at DESC"
             ).fetchall()
+            job_rows = conn.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC"
+            ).fetchall()
+            jobs_by_clip: dict[str, list[dict[str, Any]]] = {}
+            for jr in job_rows:
+                job_dict = self._row_to_job(jr)
+                jobs_by_clip.setdefault(job_dict["clip_id"], []).append(job_dict)
             result = []
             for r in rows:
                 item = json.loads(r["meta_json"])
-                item["jobs"] = self.list_jobs_for_clip(item["clip_id"])
+                item["jobs"] = jobs_by_clip.get(item["clip_id"], [])
                 result.append(item)
             return result
 
     def get_recording(self, clip_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             row = conn.execute(
                 "SELECT meta_json FROM recordings WHERE clip_id = ?", (clip_id,)
             ).fetchone()
             if row is None:
                 return None
             item = json.loads(row["meta_json"])
-            item["jobs"] = self.list_jobs_for_clip(clip_id)
+            job_rows = conn.execute(
+                "SELECT * FROM jobs WHERE clip_id = ? ORDER BY created_at DESC",
+                (clip_id,),
+            ).fetchall()
+            item["jobs"] = [self._row_to_job(jr) for jr in job_rows]
             return item
 
     def delete_recording(self, clip_id: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             conn.execute("DELETE FROM jobs WHERE clip_id = ?", (clip_id,))
             cur = conn.execute("DELETE FROM recordings WHERE clip_id = ?", (clip_id,))
-            conn.commit()
             return cur.rowcount > 0
 
+    def update_recording_metadata(
+        self,
+        clip_id: str,
+        title: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Update title and/or notes on an existing recording row and return full metadata."""
+        with self._lock, self._session() as conn:
+            row = conn.execute(
+                "SELECT meta_json FROM recordings WHERE clip_id = ?", (clip_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            item = json.loads(row["meta_json"])
+            if title is not None:
+                item["title"] = title
+            if notes is not None:
+                item["notes"] = notes
+            conn.execute(
+                "UPDATE recordings SET title = ?, meta_json = ? WHERE clip_id = ?",
+                (item.get("title", clip_id), json.dumps(item), clip_id),
+            )
+            job_rows = conn.execute(
+                "SELECT * FROM jobs WHERE clip_id = ? ORDER BY created_at DESC",
+                (clip_id,),
+            ).fetchall()
+            item["jobs"] = [self._row_to_job(jr) for jr in job_rows]
+            return item
+
     def upsert_job(self, job: dict[str, Any]) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO jobs (
@@ -177,20 +232,19 @@ class Database:
                     job.get("error_message"),
                 ),
             )
-            conn.commit()
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             return self._row_to_job(row) if row is not None else None
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
             return [self._row_to_job(r) for r in rows]
 
     def list_jobs_for_clip(self, clip_id: str) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._session() as conn:
             rows = conn.execute(
                 "SELECT * FROM jobs WHERE clip_id = ? ORDER BY created_at DESC", (clip_id,)
             ).fetchall()

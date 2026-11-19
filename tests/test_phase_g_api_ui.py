@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from fastapi.testclient import TestClient
 
+from src import __version__
 from src.cameras.v4l2_usb import V4L2UsbCameraBackend
 from src.main import create_app
 
@@ -103,10 +104,17 @@ def test_full_api_and_ui_workflow(temp_data_dir: Path) -> None:
         assert comp["job_count"] == 1
 
         sys_info = client.get("/api/system").json()
-        assert sys_info["current_version"] == "0.1.0"
+        assert sys_info["current_version"] == __version__ == "1.0.0"
+        assert sys_info["changelog"][0]["version"] == "1.0.0"
         assert sys_info["disk"]["free_bytes"] > 0
         assert "hardware" in sys_info
+        assert "inspector_budgets" in sys_info["hardware"]
         assert sys_info["hardware"]["total_ram_gb"] > 0
+        assert "iconbv.png" in idx_res.text
+        assert "iconbv.svg" in idx_res.text
+        svg_res = client.get("/static/iconbv.svg")
+        assert svg_res.status_code == 200
+        assert "<svg" in svg_res.text
         assert "data-tip=" in idx_res.text
         assert "unlockCameraControls()" in idx_res.text
 
@@ -657,8 +665,128 @@ ioctl: VIDIOC_ENUM_FMT
         assert cam.is_streaming_at(1280, 720, 60)
 
 
+def test_record_stop_endpoint_and_ui_integrity(temp_data_dir: Path) -> None:
+    app = create_app(data_dir=temp_data_dir, start_worker=False, realtime_synthetic=False)
+    with TestClient(app) as client:
+        stop_res = client.post("/api/record/stop")
+        assert stop_res.status_code == 200
+        assert stop_res.json() == {"stopping": False, "is_recording": False}
+
+        jobs_res = client.get("/api/jobs")
+        assert jobs_res.status_code == 200
+        jobs_data = jobs_res.json()
+        assert "jobs" in jobs_data
+        assert "hardware_thermal" in jobs_data
+        assert "cpu_temp_c" in jobs_data["hardware_thermal"]
+
+        html = client.get("/").text
+        js = client.get("/static/app.js").text
+        assert 'id="upload-video-file"' in html
+        assert "upload-video-file" in js
+        assert "upload-file-input" not in js
+        assert 'id="trig-status-badge"' in html
+        assert "trig-status-badge" in js
+        assert "trigger-status-badge" not in js
+        assert "$X(t)$" not in html
+        assert "$X_{\\text" not in html
+        assert "'banner warn'" not in js
 
 
+def test_schlieren_slit_scan_stills_and_full_ui(temp_data_dir: Path) -> None:
+    app = create_app(data_dir=temp_data_dir, start_worker=False, realtime_synthetic=False)
+    with TestClient(app) as client:
+        sel = client.post(
+            "/api/cameras/select",
+            json={"camera_id": "synthetic:0", "complete_setup": True},
+        )
+        assert sel.status_code == 200
 
+        for mode in ("schlieren", "slit_scan", "slit_scan_h"):
+            frame_res = client.get(f"/api/cameras/preview.jpg?mode={mode}")
+            assert frame_res.status_code == 200
+            assert frame_res.headers["content-type"] == "image/jpeg"
+            assert frame_res.content.startswith(b"\xff\xd8")
+
+        demos_res = client.post("/api/library/demo-clips")
+        assert demos_res.status_code == 200
+        clips = demos_res.json()["clips"]
+        assert len(clips) >= 1
+        clip_id = clips[0]["clip_id"]
+
+        for style in ("chrono_paint", "strobe_ghost", "median_bg", "motion_trails"):
+            still_res = client.get(
+                f"/api/library/{clip_id}/still?style={style}&sensitivity=2.0&strobe_count=5"
+            )
+            assert still_res.status_code == 200
+            assert still_res.headers["content-type"] == "image/png"
+            assert still_res.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+        dl_res = client.get(f"/api/library/{clip_id}/still?style=chrono_paint&download=true")
+        assert dl_res.status_code == 200
+        assert "attachment;" in dl_res.headers.get("content-disposition", "")
+
+        bad_res = client.get(f"/api/library/{clip_id}/still?style=invalid")
+        assert bad_res.status_code == 400
+
+        html = client.get("/").text
+        for token in (
+            "stills-modal",
+            "schlieren",
+            "slit_scan",
+            "slit_scan_h",
+        ):
+            assert token in html
+        for hidden_mode_token in (
+            "btn-mode-studio",
+            "btn-mode-lab",
+            "ui-mode-studio",
+            "lab-only",
+        ):
+            assert hidden_mode_token not in html
+
+        repo_root = Path(__file__).resolve().parents[1]
+        assert (repo_root / "LICENSE").exists()
+
+
+def test_clip_rename_notes_and_quick_capture_presets(temp_data_dir: Path) -> None:
+    import json
+
+    app = create_app(data_dir=temp_data_dir, start_worker=False, realtime_synthetic=False)
+    with TestClient(app) as client:
+        demos_res = client.post("/api/library/demo-clips")
+        assert demos_res.status_code == 200
+        clip_id = demos_res.json()["clips"][0]["clip_id"]
+
+        patch_res = client.patch(
+            f"/api/library/{clip_id}",
+            json={"title": "Cooling Fan 1800 RPM", "notes": "Rigid tripod at 45 cm"},
+        )
+        assert patch_res.status_code == 200
+        body = patch_res.json()
+        assert body["title"] == "Cooling Fan 1800 RPM"
+        assert body["notes"] == "Rigid tripod at 45 cm"
+
+        fetched = client.get(f"/api/library/{clip_id}")
+        assert fetched.status_code == 200
+        assert fetched.json()["title"] == "Cooling Fan 1800 RPM"
+        assert fetched.json()["notes"] == "Rigid tripod at 45 cm"
+
+        disk_meta = json.loads(
+            (temp_data_dir / "recordings" / clip_id / "meta.json").read_text(encoding="utf-8")
+        )
+        assert disk_meta["title"] == "Cooling Fan 1800 RPM"
+        assert disk_meta["notes"] == "Rigid tripod at 45 cm"
+
+        empty_res = client.patch(f"/api/library/{clip_id}", json={"title": "   "})
+        assert empty_res.status_code == 400
+
+        missing_res = client.patch("/api/library/no-such-clip", json={"title": "Test"})
+        assert missing_res.status_code == 404
+
+        html = client.get("/").text
+        assert "capture-quick-presets" in html
+        assert "applyCaptureQuickPreset" in html
+        js = client.get("/static/app.js").text
+        assert "saveClipMetadata" in js
 
 

@@ -63,6 +63,15 @@ body {
   box-shadow: 0 0 12px var(--accent);
 }
 
+.brand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+}
+
 .nav-tabs {
   display: flex;
   gap: 0.4rem;
@@ -160,7 +169,8 @@ body {
   background: var(--bg-elevated);
 }
 
-.banner.warning {
+.banner.warning,
+.banner.warn {
   border-color: rgba(245, 158, 11, 0.5);
   background: rgba(245, 158, 11, 0.1);
   color: #fcd34d;
@@ -401,6 +411,7 @@ label {
   left: 50%;
   transform: translateX(-50%);
   width: 250px;
+  max-width: min(250px, 75vw);
   background: #020617;
   color: var(--text-main);
   border: 1px solid var(--accent);
@@ -638,6 +649,8 @@ canvas.plot-canvas {
   border-radius: var(--radius);
   max-width: 680px;
   width: 100%;
+  max-height: 92vh;
+  overflow-y: auto;
   padding: 1.5rem;
 }
 
@@ -672,3 +685,283 @@ canvas.plot-canvas {
   animation: pulseHighlight 0.9s ease-in-out 3;
   outline: 2px solid #facc15 !important;
 }
+
+/* Android-Style Dual-Handle Video Trim Timeline */
+.trim-timeline-wrap {
+  user-select: none;
+  margin: 0.9rem 0;
+}
+
+.trim-track {
+  position: relative;
+  height: 44px;
+  background: #050811;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.trim-cut-left,
+.trim-cut-right {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(239, 68, 68, 0.22),
+    rgba(239, 68, 68, 0.22) 6px,
+    rgba(15, 23, 42, 0.78) 6px,
+    rgba(15, 23, 42, 0.78) 12px
+  );
+  pointer-events: none;
+}
+
+.trim-cut-left {
+  left: 0;
+}
+
+.trim-cut-right {
+  right: 0;
+}
+
+.trim-active-window {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(56, 189, 248, 0.16);
+  border-top: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  pointer-events: none;
+}
+
+.trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  margin-left: -8px;
+  background: var(--accent);
+  border-radius: 4px;
+  cursor: ew-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.7);
+  z-index: 4;
+}
+
+.trim-handle::after {
+  content: "||";
+  color: #020617;
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: -1px;
+}
+
+.trim-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #facc15;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* Motion Still Studio */
+.still-style-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.still-style-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.5rem;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  font-size: 0.8rem;
+  gap: 0.15rem;
+  cursor: pointer;
+}
+
+.still-style-btn small {
+  font-size: 0.71rem;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.still-style-btn.active {
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, 0.14);
+}
+
+/* Clip Deep Inspector Modal */
+.frontier-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.frontier-mode-card {
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.7rem 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
+.frontier-img-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.65rem;
+  margin-top: 0.5rem;
+}
+
+.frontier-img-card {
+  background: #020617;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.4rem;
+  text-align: center;
+}
+
+.frontier-img-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 0.3rem;
+}
+
+.frontier-img-card small {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.inspector-brief-card {
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.inspector-brief-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.65rem;
+  margin: 0.2rem 0 0.45rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.inspector-brief-grid strong {
+  color: var(--text-main);
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.inspector-loading {
+  background: var(--bg-main);
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 0.6rem;
+  padding: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+}
+
+.bv-spinner {
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(56, 189, 248, 0.22);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  animation: bv-spin 0.8s linear infinite;
+}
+
+@keyframes bv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.frontier-summary-banner {
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 0.5rem;
+  padding: 0.65rem 0.85rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.quick-preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: -0.35rem 0 0.85rem;
+}
+
+.quick-preset-btn {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.74rem;
+  border-radius: 999px;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.quick-preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-main);
+}
+
+.clip-notes-text {
+  font-size: 0.79rem;
+  color: #bae6fd;
+  background: rgba(56, 189, 248, 0.08);
+  border-left: 2px solid var(--accent);
+  padding: 0.3rem 0.55rem;
+  border-radius: 0.25rem;
+  margin-bottom: 0.65rem;
+  word-break: break-word;
+}
+
+.clip-inline-edit {
+  display: none;
+  flex-direction: column;
+  gap: 0.45rem;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.6rem;
+  margin-bottom: 0.7rem;
+}
+
+.clip-inline-edit.open {
+  display: flex;
+}
+

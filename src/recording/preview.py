@@ -6,11 +6,13 @@ import collections
 import threading
 import time
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import cv2
 import numpy as np
 
+from src.cameras.base import FramePacket
 from src.cameras.manager import CameraManager
 
 
@@ -36,6 +38,34 @@ class LivePreviewService:
         self._preroll_buffer: collections.deque[tuple[np.ndarray, int, int]] = collections.deque(
             maxlen=75
         )
+        self._recording_active: bool = False
+        self._latest_rec_frame: np.ndarray | None = None
+        self._latest_rec_lock = threading.Lock()
+        self._dual_pool = ThreadPoolExecutor(max_workers=2)
+        self._schlieren_ref: np.ndarray | None = None
+        self._slit_canvas: np.ndarray | None = None
+        self._last_mode: str = "normal"
+        self._dvs_ref: np.ndarray | None = None
+        self._dvs_on: np.ndarray | None = None
+        self._dvs_off: np.ndarray | None = None
+        self._dvs_last_ns: int = 0
+        self._dvs_event_rate: float = 0.0
+
+    def set_recording_active(self, active: bool) -> None:
+        """Toggle recording state so live preview never steals hardware frames from capture."""
+        self._recording_active = bool(active)
+        if not self._recording_active:
+            with self._latest_rec_lock:
+                self._latest_rec_frame = None
+
+    def publish_recording_frame(self, bgr: np.ndarray) -> None:
+        """Publish the latest captured frame for non-intrusive preview rendering during recording."""
+        with self._latest_rec_lock:
+            self._latest_rec_frame = bgr.copy()
+
+    def shutdown(self) -> None:
+        """Clean up preview thread pool resources."""
+        self._dual_pool.shutdown(wait=False)
 
     def push_preroll_frame(
         self, bgr: np.ndarray, mono_ns: int, wall_ns: int
@@ -97,13 +127,15 @@ class LivePreviewService:
         }
 
     def set_tare_frame(self, enable: bool = True) -> dict[str, Any]:
-        """Lock the current camera frame as a static 50% gray reference (Tare / Zero Frame)."""
+        """Lock the current camera frame as a static 50% gray / Schlieren reference (Tare / Zero Frame)."""
         if not enable:
             self.tare_frame = None
+            self._schlieren_ref = None
             return {"tare_locked": False}
         cam = self.camera_manager.get_active()
         pkt = cam.get_frame(timeout=2.0)
         self.tare_frame = pkt.bgr.copy()
+        self._schlieren_ref = self.tare_frame.copy()
         return {"tare_locked": True, "shape": list(self.tare_frame.shape[:2])}
 
     def set_roi(
@@ -192,23 +224,49 @@ class LivePreviewService:
         cam_view: str = "auto",
     ) -> bytes:
         """Grab a single preview JPEG frame with Posy modes, Tare lock, Stroboscope, Focus/Zebra assist, or Dual-Cam view."""
-        from concurrent.futures import ThreadPoolExecutor
-
         dual_on = bool(self.camera_manager.settings.dual_camera_enabled)
         eff_view = ("sbs" if dual_on else "a") if cam_view in ("", "auto") else cam_view
 
-        if dual_on and eff_view == "b":
+        if self._recording_active:
+            active_roi = self.roi
+            with self._latest_rec_lock:
+                rec_bgr = (
+                    self._latest_rec_frame.copy()
+                    if self._latest_rec_frame is not None
+                    else None
+                )
+            if rec_bgr is None:
+                if self._frame_history:
+                    rec_bgr = self._frame_history[-1].copy()
+                else:
+                    rec_bgr = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(
+                        rec_bgr,
+                        "RECORDING IN PROGRESS...",
+                        (150, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75,
+                        (200, 210, 225),
+                        2,
+                    )
+            pkt = FramePacket(
+                frame_index=0,
+                timestamp_monotonic_ns=time.monotonic_ns(),
+                timestamp_wall_ns=time.time_ns(),
+                bgr=rec_bgr,
+                jpeg_bytes=None,
+            )
+        elif dual_on and eff_view == "b":
             cam = self.camera_manager.get_secondary()
             active_roi = self.roi_b if self.roi_b is not None else self.roi
             pkt = cam.get_frame(timeout=3.0)
         elif dual_on and eff_view == "sbs":
             cam_a = self.camera_manager.get_active()
             cam_b = self.camera_manager.get_secondary()
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                fut_a = pool.submit(cam_a.get_frame, 3.0)
-                fut_b = pool.submit(cam_b.get_frame, 3.0)
-                pkt = fut_a.result()
-                pkt_b = fut_b.result()
+            fut_a = self._dual_pool.submit(cam_a.get_frame, 3.0)
+            fut_b = self._dual_pool.submit(cam_b.get_frame, 3.0)
+            pkt = fut_a.result()
+            pkt_b = fut_b.result()
             self.record_roi_sample(pkt.bgr, pkt.timestamp_monotonic_ns)
             self.push_preroll_frame(pkt.bgr, pkt.timestamp_monotonic_ns, pkt.timestamp_wall_ns)
             h_a, w_a = pkt.bgr.shape[:2]
@@ -244,8 +302,6 @@ class LivePreviewService:
             left[:, -1:] = 80
             right[:, :1] = 80
             sbs_vis = np.concatenate([left, right], axis=1)
-            from src.cameras.base import FramePacket
-
             pkt = FramePacket(
                 frame_index=pkt.frame_index,
                 timestamp_monotonic_ns=pkt.timestamp_monotonic_ns,
@@ -262,13 +318,30 @@ class LivePreviewService:
             self.record_roi_sample(pkt.bgr, pkt.timestamp_monotonic_ns)
             self.push_preroll_frame(pkt.bgr, pkt.timestamp_monotonic_ns, pkt.timestamp_wall_ns)
 
-        # Reset history buffer if frame dimensions changed (e.g. switching between Single and Side-by-Side)
+        # Reset history/state buffers if frame dimensions, slit-scan, or DVS mode changed
         if self._frame_history and self._frame_history[-1].shape != pkt.bgr.shape:
             self._frame_history.clear()
             self._persistence_accum = None
             self._strobe_held_frame = None
+            self._slit_canvas = None
+            self._dvs_ref = None
+            self._dvs_on = None
+            self._dvs_off = None
             if self.tare_frame is not None and self.tare_frame.shape != pkt.bgr.shape:
                 self.tare_frame = None
+            if self._schlieren_ref is not None and self._schlieren_ref.shape != pkt.bgr.shape:
+                self._schlieren_ref = None
+        if mode != self._last_mode and (
+            mode in ("slit_scan", "slit_scan_h")
+            or self._last_mode in ("slit_scan", "slit_scan_h")
+        ):
+            self._slit_canvas = None
+        if mode != self._last_mode and (mode == "dvs_events" or self._last_mode == "dvs_events"):
+            self._dvs_ref = None
+            self._dvs_on = None
+            self._dvs_off = None
+            self._dvs_event_rate = 0.0
+        self._last_mode = mode
 
         # If normal mode, no tare lock, no ROI overlay, no assist, and native JPEG is available at <= max_width
         h, w = pkt.bgr.shape[:2]
@@ -287,7 +360,122 @@ class LivePreviewService:
         eff_gain = max(1, round(gain))
         k = max(1, min(shift_frames, 7))
 
-        if self.tare_frame is not None and self.tare_frame.shape == pkt.bgr.shape:
+        if mode == "schlieren":
+            ref = (
+                self.tare_frame
+                if (self.tare_frame is not None and self.tare_frame.shape == pkt.bgr.shape)
+                else self._schlieren_ref
+            )
+            if ref is None or ref.shape != pkt.bgr.shape:
+                self._schlieren_ref = pkt.bgr.copy()
+                ref = self._schlieren_ref
+            diff = cv2.GaussianBlur(
+                pkt.bgr.astype(np.float32) - ref.astype(np.float32), (3, 3), 0
+            )
+            mag = np.sqrt(np.sum(diff * diff, axis=2))
+            scaled = np.clip((mag - 2.5) * max(2.0, float(gain) * 4.0), 0.0, 255.0).astype(np.uint8)
+            heat_bgr = cv2.applyColorMap(scaled, cv2.COLORMAP_INFERNO)
+            gray_bgr = cv2.cvtColor(cv2.cvtColor(pkt.bgr, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+            blended = cv2.addWeighted(gray_bgr, 0.42, heat_bgr, 0.58, 0.0)
+            dim_gray = (gray_bgr.astype(np.uint16) * 180 // 255).astype(np.uint8)
+            vis = np.where((mag > 1.0)[..., None], blended, dim_gray)
+            cv2.putText(
+                vis,
+                "SCHLIEREN BOS (HEAT / AIRFLOW)",
+                (10, h - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (11, 158, 245),
+                2,
+            )
+        elif mode in ("slit_scan", "slit_scan_h"):
+            if self._slit_canvas is None or self._slit_canvas.shape != pkt.bgr.shape:
+                self._slit_canvas = pkt.bgr.copy()
+            strip = max(2, min(6, eff_gain + 1))
+            if mode == "slit_scan":
+                strip = min(strip, max(1, w - 1))
+                self._slit_canvas[:, :-strip] = self._slit_canvas[:, strip:]
+                cx = w // 2
+                self._slit_canvas[:, -strip:] = pkt.bgr[:, cx : cx + 1]
+                vis = self._slit_canvas.copy()
+                cv2.line(
+                    vis,
+                    (max(0, w - strip - 1), 0),
+                    (max(0, w - strip - 1), h - 1),
+                    (248, 189, 56),
+                    2,
+                )
+            else:
+                strip = min(strip, max(1, h - 1))
+                self._slit_canvas[:-strip, :] = self._slit_canvas[strip:, :]
+                cy = h // 2
+                self._slit_canvas[-strip:, :] = pkt.bgr[cy : cy + 1, :]
+                vis = self._slit_canvas.copy()
+                cv2.line(
+                    vis,
+                    (0, max(0, h - strip - 1)),
+                    (w - 1, max(0, h - strip - 1)),
+                    (248, 189, 56),
+                    2,
+                )
+            cv2.putText(
+                vis,
+                "LIVE SLIT-SCAN TIME-RIBBON",
+                (10, h - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (248, 189, 56),
+                2,
+            )
+        elif mode == "dvs_events":
+            gray = cv2.GaussianBlur(
+                cv2.cvtColor(pkt.bgr, cv2.COLOR_BGR2GRAY).astype(np.float32), (3, 3), 0
+            )
+            log_now = np.log(gray + 16.0)
+            c_thresh = max(0.05, 0.22 / max(0.5, float(gain)))
+            if self._dvs_ref is None or self._dvs_ref.shape != log_now.shape:
+                self._dvs_ref = log_now.copy()
+                self._dvs_on = np.zeros_like(log_now, dtype=np.float32)
+                self._dvs_off = np.zeros_like(log_now, dtype=np.float32)
+                self._dvs_last_ns = pkt.timestamp_monotonic_ns
+                self._dvs_event_rate = 0.0
+            else:
+                delta = log_now - self._dvs_ref
+                on_mask = delta >= c_thresh
+                off_mask = delta <= -c_thresh
+                fired = on_mask | off_mask
+                self._dvs_ref[fired] = log_now[fired]
+                dt_raw = (pkt.timestamp_monotonic_ns - self._dvs_last_ns) / 1e9
+                dt_s = max(0.005, min(0.5, dt_raw)) if dt_raw > 0 else (1.0 / 30.0)
+                self._dvs_last_ns = pkt.timestamp_monotonic_ns
+                self._dvs_event_rate = float(np.count_nonzero(fired)) / dt_s
+                if self._dvs_on is None or self._dvs_off is None:
+                    self._dvs_on = np.zeros_like(log_now, dtype=np.float32)
+                    self._dvs_off = np.zeros_like(log_now, dtype=np.float32)
+                self._dvs_on *= 0.78
+                self._dvs_off *= 0.78
+                self._dvs_on[on_mask] = 1.0
+                self._dvs_off[off_mask] = 1.0
+            base = np.zeros((h, w, 3), dtype=np.float32)
+            base[..., 0] = 20.0
+            base[..., 1] = 8.0
+            base[..., 2] = 5.0
+            on_col = np.array([248.0, 189.0, 56.0], dtype=np.float32)
+            off_col = np.array([90.0, 95.0, 250.0], dtype=np.float32)
+            on_f = (self._dvs_on if self._dvs_on is not None else np.zeros((h, w)))[..., None]
+            off_f = (self._dvs_off if self._dvs_off is not None else np.zeros((h, w)))[..., None]
+            comp = base + on_f * on_col[None, None, :] + off_f * off_col[None, None, :]
+            vis = np.clip(comp, 0.0, 255.0).astype(np.uint8)
+            cv2.putText(
+                vis,
+                f"DVS EVENT CAM (+ON/-OFF) | {self._dvs_event_rate / 1000.0:.1f} kEv/s",
+                (10, h - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (248, 189, 56),
+                2,
+            )
+        elif self.tare_frame is not None and self.tare_frame.shape == pkt.bgr.shape:
             delta = pkt.bgr.astype(np.int16) - self.tare_frame.astype(np.int16)
             vis = np.clip(128 + (delta * max(2, eff_gain)) // 2, 0, 255).astype(np.uint8)
             cv2.putText(
@@ -379,8 +567,9 @@ class LivePreviewService:
             )
         elif assist == "zebras":
             max_ch = np.max(pkt.bgr, axis=2)
-            yy, xx = np.indices((h, w))
-            stripe_mask = (max_ch >= 250) & (((xx + yy) // 4) % 2 == 0)
+            y_idx = np.arange(h, dtype=np.int32)[:, None]
+            x_idx = np.arange(w, dtype=np.int32)[None, :]
+            stripe_mask = (max_ch >= 250) & ((((x_idx + y_idx) >> 2) & 1) == 0)
             vis[stripe_mask] = (36, 36, 239)
             clipped_pct = round(float(np.mean(max_ch >= 250)) * 100.0, 2)
             cv2.putText(
@@ -426,6 +615,20 @@ class LivePreviewService:
                 )
 
         cur_h, cur_w = vis.shape[:2]
+        if self._recording_active and cur_w >= 80 and cur_h >= 32:
+            cv2.rectangle(vis, (cur_w - 68, 6), (cur_w - 8, 28), (15, 23, 42), -1)
+            cv2.circle(vis, (cur_w - 56, 17), 5, (48, 48, 240), -1)
+            cv2.putText(
+                vis,
+                "REC",
+                (cur_w - 46, 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (248, 250, 252),
+                1,
+                cv2.LINE_AA,
+            )
+
         if cur_w > max_width:
             scale = max_width / float(cur_w)
             vis = cv2.resize(

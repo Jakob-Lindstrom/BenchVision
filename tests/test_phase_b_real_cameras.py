@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from src.cameras import CAMERA_REGISTRY, CameraManager
-from src.cameras.picamera2_backend import Picamera2Backend, resolve_sensor_profile
+from src.cameras.picamera2_backend import (
+    Picamera2Backend,
+    kelvin_to_colour_gains,
+    resolve_sensor_profile,
+)
 from src.cameras.v4l2_usb import (
     V4L2UsbCameraBackend,
     parse_v4l2_ctrls_output,
@@ -97,4 +101,25 @@ def test_camera_manager_discovery_and_lens_config(app_settings: AppSettings) -> 
     caps = mgr.get_capabilities(usb_cam)
     assert caps.lens_info["focal_length_mm"] == 3.6
     assert caps.rolling_shutter_warning is not None
+
+
+def test_picamera2_colour_gains_and_stream_tracking() -> None:
+    r_mid, b_mid = kelvin_to_colour_gains(4600)
+    assert (r_mid, b_mid) == (1.65, 1.55)
+
+    r_warm, b_warm = kelvin_to_colour_gains(2500)
+    r_cool, b_cool = kelvin_to_colour_gains(8000)
+    assert 0.8 <= r_warm < r_mid < r_cool <= 3.2
+    assert 0.8 <= b_cool < b_mid < b_warm <= 3.2
+
+    cam = Picamera2Backend(sensor_model="imx296")
+    assert cam.is_streaming_at(640, 480, 30) is False
+    cam.running = True
+    cam._stream_width = 1456
+    cam._stream_height = 1088
+    cam._stream_fps = 60
+    assert cam.is_streaming_at(1456, 1088, 60) is True
+    assert cam.is_streaming_at(640, 480, 30) is False
+    cam.stop()
+    assert cam.is_streaming_at(1456, 1088, 60) is False
 

@@ -70,6 +70,7 @@ class BenchVisionState:
 
     def shutdown(self) -> None:
         self.job_manager.shutdown()
+        self.preview_service.shutdown()
         self.camera_manager.shutdown()
 
 
@@ -157,10 +158,10 @@ def print_startup_banner(
     """Print a clean startup banner with URLs, hardware profile, and active data directory."""
     ip = get_local_ip()
     hw = detect_hardware_profile()
-    hw_model = hw.get("model", "Generic Linux Host")
+    hw_model = hw.get("model", "Raspberry Pi 4 / 5")
     ram_gb = hw.get("total_ram_gb", 0.0)
     print("=" * 68)
-    print(f"  BenchVision v{__version__} — Optical Vibrometer & Motion Magnification")
+    print(f"  BenchVision v{__version__} — Raspberry Pi 4 & 5 Optical Vibrometer")
     print("=" * 68)
     print(f"  Local URL:      http://localhost:{port}")
     print(f"  LAN IP URL:     http://{ip}:{port}  (bind: {host})")

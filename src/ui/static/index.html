@@ -4,7 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BenchVision — Raspberry Pi Motion &amp; Video Magnification</title>
-  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <link rel="icon" type="image/svg+xml" href="/static/iconbv.svg" />
+  <link rel="icon" type="image/png" href="/static/iconbv.png" />
+  <link rel="stylesheet" href="/static/styles.css?v=14" />
   <style>
     .dual-cam-only { display: none !important; }
   </style>
@@ -12,7 +14,7 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-dot"></span>
+      <img src="/static/iconbv.png" onerror="this.onerror=null; this.src='/static/iconbv.svg';" alt="BenchVision" class="brand-icon" />
       <span>BenchVision</span>
       <span id="active-camera-badge" class="badge">Detecting Camera...</span>
       <span id="dual-cam-topbar-badge" class="badge global dual-cam-only" title="Synchronized Dual-Camera Mode Active">DUAL CAM: A+B</span>
@@ -60,14 +62,22 @@
             </div>
             <div class="player-toolbar">
               <div style="display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;">
-                <select id="live-preview-mode" onchange="updateLivePreviewMode()" title="Switch live preview between normal video, Posy modes, and Stroboscope">
-                  <option value="normal">Live View: Normal Camera</option>
-                  <option value="posy_2_1">Posy Motion Extraction (2-Frame Shift, 1x)</option>
-                  <option value="posy_3_3">Posy Motion Extraction (3-Frame Shift, 3x Gain)</option>
-                  <option value="posy_6_6">Posy Motion Extraction (6-Frame Shift, 6x Micro)</option>
-                  <option value="posy_rgb_trail">Posy RGB Chrono-Chromatic Trail (Rainbow)</option>
-                  <option value="posy_peak_hold">Posy Motion Persistence (Peak-Hold Glow)</option>
-                  <option value="stroboscope">Digital Stroboscope (Alias Freeze)</option>
+                <select id="live-preview-mode" onchange="updateLivePreviewMode()" title="Switch live preview between normal video, Posy motion modes, Schlieren heat shimmer, and Slit-Scan time-warp">
+                  <optgroup label="Standard">
+                    <option value="normal">Live View: Normal Camera</option>
+                  </optgroup>
+                  <optgroup label="Live Vision Effects">
+                    <option value="posy_2_1">Posy Motion Extraction (2-Frame Shift, 1x)</option>
+                    <option value="posy_3_3">Posy Motion Extraction (3-Frame Shift, 3x Gain)</option>
+                    <option value="posy_6_6">Posy Motion Extraction (6-Frame Shift, 6x Micro)</option>
+                    <option value="posy_rgb_trail">Posy RGB Chrono-Chromatic Trail (Rainbow)</option>
+                    <option value="posy_peak_hold">Posy Motion Persistence (Peak-Hold Glow)</option>
+                    <option value="schlieren">Schlieren BOS (Heat &amp; Airflow Shimmer)</option>
+                    <option value="slit_scan">Slit-Scan Time-Warp (Vertical Ribbon)</option>
+                    <option value="slit_scan_h">Slit-Scan Time-Warp (Horizontal Ribbon)</option>
+                    <option value="dvs_events">Neuromorphic Event Cam (DVS +ON / -OFF)</option>
+                    <option value="stroboscope">Digital Stroboscope (Alias Freeze)</option>
+                  </optgroup>
                 </select>
                 <select id="live-preview-assist" onchange="updateLivePreviewMode()" title="Optical focus peaking (green edges) for C/CS lenses or overexposure zebra warning stripes (>250)">
                   <option value="off">Assist: Off</option>
@@ -87,6 +97,7 @@
               </div>
               <span id="live-scale-badge" class="badge" title="Active physical scale factor (mm/pixel) from 2-Point Ruler or Lens FOV">Scale: — mm/px</span>
             </div>
+            <div id="live-mode-context-bar" class="player-toolbar" style="display: none; border-color: rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.06);"></div>
             <div id="ruler-calib-bar" class="player-toolbar" style="display: none; border-color: var(--warning); background: rgba(245, 158, 11, 0.08);">
               <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                 <strong style="color: #fcd34d;">2-Point Ruler Calibration:</strong>
@@ -167,36 +178,47 @@
                 <input id="rec-fps" type="number" value="30" onchange="onTargetFpsChange()" />
               </div>
             </div>
-            <div class="form-row">
-              <div>
-                <label for="ctrl-exposure">
-                  Exposure (&mu;s)
-                  <span class="tip" tabindex="0" data-tip="Shutter open time per frame in microseconds (10000 us = 10 ms = 1/100s). Shorter exposure freezes fast vibrations cleanly but needs brighter lighting. Automatically clamped below 1/FPS.">?</span>
-                </label>
-                <input id="ctrl-exposure" type="number" value="10000" step="500" />
-              </div>
-              <div>
-                <label for="ctrl-gain">
-                  Gain
-                  <span class="tip" tabindex="0" data-tip="Sensor brightness amplification. Increase if the image is dark after locking exposure, but keep low to minimize sensor grain.">?</span>
-                </label>
-                <input id="ctrl-gain" type="number" value="1.0" step="0.5" />
-              </div>
-              <div>
-                <label for="ctrl-wb">
-                  White Balance (K)
-                  <span class="tip" tabindex="0" data-tip="Color temperature in Kelvin (2800K warm indoor bulb, 4600K neutral indoor, 6500K daylight). Locking prevents color drift during pulse/rPPG analysis.">?</span>
-                </label>
-                <input id="ctrl-wb" type="number" value="4600" step="100" />
-              </div>
-              <div>
-                <label for="ctrl-focus">
-                  Focus Position
-                  <span class="tip" tabindex="0" data-tip="Manual lens focus position for motorized cameras (e.g. Pi Camera Module 3). Fixed-focus webcams like the Logitech C270 ignore this.">?</span>
-                </label>
-                <input id="ctrl-focus" type="number" value="0.0" step="0.5" />
-              </div>
+            <div id="capture-quick-presets" class="quick-preset-bar" aria-label="One-Click Capture Presets">
+              <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">Quick Presets:</span>
+              <button type="button" class="quick-preset-btn" onclick="applyCaptureQuickPreset(320, 240, 120, 6000)" title="Fast sensor crop for high-frequency vibration capture up to 60 Hz">320&times;240 @ 120 FPS (High-Hz)</button>
+              <button type="button" class="quick-preset-btn" onclick="applyCaptureQuickPreset(640, 480, 60, 10000)" title="Smooth VGA capture for up to 30 Hz vibrations">640&times;480 @ 60 FPS (Fast)</button>
+              <button type="button" class="quick-preset-btn" onclick="applyCaptureQuickPreset(640, 480, 30, 10000)" title="Balanced VGA capture for general motion and rPPG pulse">640&times;480 @ 30 FPS (Balanced)</button>
+              <button type="button" class="quick-preset-btn" onclick="applyCaptureQuickPreset(1280, 720, 30, 12000)" title="720p HD capture for broader inspection">1280&times;720 @ 30 FPS (HD)</button>
+              <button type="button" class="quick-preset-btn" onclick="applyCaptureQuickPreset(1920, 1080, 30, 12000)" title="Full 1080p capture recommended on Raspberry Pi 5 (8 GB)">1920&times;1080 @ 30 FPS (Pi 5 FHD)</button>
             </div>
+            <details class="adv-drawer" id="cam-manual-controls-drawer">
+              <summary>Manual Exposure, Gain, White Balance &amp; Focus Controls</summary>
+              <div class="form-row" style="margin-bottom: 0;">
+                <div>
+                  <label for="ctrl-exposure">
+                    Exposure (&mu;s)
+                    <span class="tip" tabindex="0" data-tip="Shutter open time per frame in microseconds (10000 us = 10 ms = 1/100s). Shorter exposure freezes fast vibrations cleanly but needs brighter lighting. Automatically clamped below 1/FPS.">?</span>
+                  </label>
+                  <input id="ctrl-exposure" type="number" value="10000" step="500" />
+                </div>
+                <div>
+                  <label for="ctrl-gain">
+                    Gain
+                    <span class="tip" tabindex="0" data-tip="Sensor brightness amplification. Increase if the image is dark after locking exposure, but keep low to minimize sensor grain.">?</span>
+                  </label>
+                  <input id="ctrl-gain" type="number" value="1.0" step="0.5" />
+                </div>
+                <div>
+                  <label for="ctrl-wb">
+                    White Balance (K)
+                    <span class="tip" tabindex="0" data-tip="Color temperature in Kelvin (2800K warm indoor bulb, 4600K neutral indoor, 6500K daylight). Locking prevents color drift during pulse/rPPG analysis.">?</span>
+                  </label>
+                  <input id="ctrl-wb" type="number" value="4600" step="100" />
+                </div>
+                <div>
+                  <label for="ctrl-focus">
+                    Focus Position
+                    <span class="tip" tabindex="0" data-tip="Manual lens focus position for motorized cameras (e.g. Pi Camera Module 3). Fixed-focus webcams like the Logitech C270 ignore this.">?</span>
+                  </label>
+                  <input id="ctrl-focus" type="number" value="0.0" step="0.5" />
+                </div>
+              </div>
+            </details>
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.75rem;">
               <span id="active-roi-badge" class="badge">ROI: Full Frame (640x480)</span>
               <div style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
@@ -254,7 +276,7 @@
 
           <div class="card">
             <div class="card-header">
-              <span class="card-title">Step 2: Nyquist Validation &amp; Lossless Recording</span>
+              <span class="card-title">Step 2: Capture &amp; Recording</span>
             </div>
             <div class="form-row">
               <div>
@@ -262,7 +284,7 @@
                   Clip Title
                   <span class="tip" tabindex="0" data-tip="Human-readable name for this recording in your Library. Defaults to a timestamped clip name unless you type a custom name.">?</span>
                 </label>
-                <input id="rec-title" type="text" value="clip-auto" oninput="state.userEditedTitle = true" />
+                <input id="rec-title" type="text" value="clip-auto" />
               </div>
               <div>
                 <label for="rec-duration">
@@ -289,6 +311,17 @@
                   <option value="mjpeg_q100">Q100 MJPEG + Lossless Frame Store</option>
                   <option value="ffv1_mkv">Lossless FFV1 / Archive</option>
                   <option value="raw_npz">Compressed Raw NumPy (.npz)</option>
+                </select>
+              </div>
+              <div>
+                <label for="rec-countdown-s">
+                  Start Delay (Hands-Off)
+                  <span class="tip" tabindex="0" data-tip="Optional countdown timer before recording starts so vibrations from clicking the mouse or touching the desk/mount settle cleanly.">?</span>
+                </label>
+                <select id="rec-countdown-s">
+                  <option value="0" selected>Immediate (0s)</option>
+                  <option value="2">2s Settling Delay</option>
+                  <option value="5">5s Settling Delay</option>
                 </select>
               </div>
             </div>
@@ -329,8 +362,15 @@
             <div id="preflight-banner" class="banner">Checking Nyquist &amp; disk space...</div>
 
             <button id="btn-record" class="primary" style="width: 100%; padding: 0.75rem;" onclick="startRecording()" title="Automatically locks camera settings, captures frames with nanosecond timestamps, and saves losslessly">
-              2. Record Lossless Clip
+              Record Lossless Clip
             </button>
+            <div id="record-progress-wrap" style="display: none; margin-top: 0.75rem;">
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem;">
+                <span id="record-progress-text" style="font-size: 0.82rem; color: var(--accent);">Capturing frames... 0%</span>
+                <button type="button" id="btn-stop-record" class="danger" style="padding: 0.28rem 0.65rem; font-size: 0.78rem;" onclick="stopRecordingEarly()">Stop &amp; Save Early</button>
+              </div>
+              <div class="progress-track"><div id="record-progress-fill" class="progress-fill" style="width: 0%;"></div></div>
+            </div>
             <div id="record-result-banner" class="banner success" style="display: none; margin-top: 0.85rem;"></div>
           </div>
         </div>
@@ -464,7 +504,7 @@
                 <input id="proc-alpha" type="number" step="1" value="25" />
               </div>
             </div>
-            <details class="adv-drawer">
+            <details class="adv-drawer" id="proc-adv-drawer">
               <summary>Advanced Signal, Pyramid &amp; Clip Trimming Parameters</summary>
               <div class="form-row">
                 <div>
@@ -640,10 +680,13 @@
               <option value="">Compare Baseline: None (Single Job)</option>
             </select>
             <span id="baseline-delta-badge" class="badge" style="display: none;">&Delta; Peak: —</span>
+            <button type="button" id="btn-open-frontier-analysis" onclick="openFrontierForSelectedJob()" title="Open Clip Deep Inspector (Auto-Find Vibrations, Airflow Swirls, Stress Map, Light Flicker)">&#128269; Deep Inspect</button>
             <button type="button" id="btn-export-report" onclick="exportDiagnosticReport()" title="Generate a standalone printable engineering report with heatmap snapshot, metrics table, spectral plots, and plain-English diagnostic summary">Export Diagnostic Report</button>
             <a id="btn-export-csv" class="btn primary" href="#" download="signal.csv" title="Download frame-by-frame raw and bandpass-filtered ROI signals as a CSV spreadsheet">Export Signal CSV</a>
           </div>
         </div>
+
+        <div id="analysis-status-banner" class="banner" style="display: none; margin-bottom: 0.9rem;"></div>
 
         <div class="kpi-grid">
           <div class="kpi-box">
@@ -707,7 +750,7 @@
               Audio Mode:
               <select id="sonify-pitch" onchange="onSonifyModeChange()">
                 <option value="1">1x Real-Time AM+FM Swell (Best for Breathing &amp; Pulse &lt; 3 Hz)</option>
-                <option value="10">4x Fast Time-Lapse Swell (Quick Scan)</option>
+                <option value="4">4x Fast Time-Lapse Swell (Quick Scan)</option>
                 <option value="50">50x Direct Acoustic Texture (Best for Machine Vibration &amp; Purring)</option>
               </select>
             </label>
@@ -868,7 +911,7 @@
         <div id="subtab-panel-orbit" class="subtab-panel">
           <div class="player-toolbar" style="margin-bottom: 0.65rem;">
             <span style="color: var(--text-muted);">
-              2D Sub-Pixel Motion Orbit (Lissajous Trajectory $X(t)$ vs. $Y(t)$) — Color-graded from Start (Cyan) to End (Amber)
+              2D Sub-Pixel Motion Orbit (Lissajous Trajectory X(t) vs. Y(t)) — Color-graded from Start (Cyan) to End (Amber)
               <span class="tip" tabindex="0" data-tip="Plots horizontal X(t) vs. vertical Y(t) sub-pixel displacement around the epicenter/ROI to reveal shaft whirl, elliptical flexing, or uniaxial linear vibration.">?</span>
             </span>
             <span id="orbit-summary-badge" class="badge global">Principal Axis &theta;: —</span>
@@ -881,7 +924,7 @@
         <div id="subtab-panel-orbit3d" class="subtab-panel">
           <div class="player-toolbar" style="margin-bottom: 0.65rem;">
             <span style="color: var(--text-muted);">
-              Orthogonal Dual-Camera 3D Spatial Trajectory ($X_{\text{Cam A}}, Y_{\text{Shared}}, Z_{\text{Cam B}}$) — Isometric Projection
+              Orthogonal Dual-Camera 3D Spatial Trajectory (X Cam A, Y Shared, Z Cam B) — Isometric Projection
               <span class="tip" tabindex="0" data-tip="Combines synchronized Cam A (X, Y) and orthogonal Cam B (Z, Y) bandpass displacements into a 3D isometric vibration orbit.">?</span>
             </span>
             <span id="orbit3d-summary-badge" class="badge global">3D RMS Radius: — &mu;m</span>
@@ -899,12 +942,12 @@
         <div class="card">
           <div class="card-header">
             <span class="card-title">System Version, Hardware, Storage &amp; Updates</span>
-            <button class="primary" onclick="triggerSystemUpdate()">Check / Update Now</button>
+            <button class="primary" onclick="triggerSystemUpdate()" title="Verify installed version and service health (run ./scripts/update.sh via SSH for full git updates)">Check Version &amp; Health</button>
           </div>
           <div class="kpi-grid">
             <div class="kpi-box">
               <div class="kpi-label">Current Version</div>
-              <div class="kpi-value" id="sys-version">0.1.0</div>
+              <div class="kpi-value" id="sys-version">1.0.0</div>
             </div>
             <div class="kpi-box">
               <div class="kpi-label">Detected Hardware</div>
@@ -913,6 +956,10 @@
             <div class="kpi-box">
               <div class="kpi-label">System RAM</div>
               <div class="kpi-value" id="sys-ram-gb">— GB</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Performance Tier</div>
+              <div class="kpi-value" id="sys-tier" style="font-size: 0.95rem;">—</div>
             </div>
             <div class="kpi-box">
               <div class="kpi-label">CPU Temperature</div>
@@ -1061,6 +1108,163 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=10"></script>
+  <!-- INTERACTIVE VIDEO TRIM / CUT TIMELINE MODAL -->
+  <div id="trim-modal" class="modal-backdrop">
+    <div class="modal-card" style="max-width: 720px;">
+      <div class="card-header">
+        <span class="card-title">&#9986; Trim / Cut Video Timeline</span>
+        <button type="button" onclick="closeTrimModal()">Close</button>
+      </div>
+      <p id="trim-clip-subtitle" style="font-size: 0.84rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+        Drag the left and right handles to cut startup/stop spikes or isolate a clean steady-state window.
+      </p>
+
+      <div class="video-box" style="margin-bottom: 0.75rem; max-height: 340px; display: flex; justify-content: center; background: #020617;">
+        <video id="trim-video-player" controls playsinline muted style="max-height: 330px; width: auto; max-width: 100%;"></video>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.35rem;">
+        <span class="badge global" id="trim-start-badge">Start: 0.00 s</span>
+        <span class="badge" id="trim-kept-badge">Kept: 0.00 s (0 frames)</span>
+        <span class="badge global" id="trim-end-badge">End: 0.00 s</span>
+      </div>
+
+      <div class="trim-timeline-wrap">
+        <div id="trim-track" class="trim-track" title="Drag Start or End handle to cut the clip timeline">
+          <div id="trim-cut-left" class="trim-cut-left" style="width: 0%;"></div>
+          <div id="trim-active-window" class="trim-active-window" style="left: 0%; width: 100%;"></div>
+          <div id="trim-cut-right" class="trim-cut-right" style="width: 0%;"></div>
+          <div id="trim-playhead" class="trim-playhead" style="left: 0%;"></div>
+          <div id="trim-handle-start" class="trim-handle" style="left: 0%;" title="Drag Start Cut Point"></div>
+          <div id="trim-handle-end" class="trim-handle" style="left: 100%;" title="Drag End Cut Point"></div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 0.45rem; flex-wrap: wrap; justify-content: space-between; align-items: center; margin-bottom: 0.95rem;">
+        <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
+          <button type="button" onclick="applyQuickSpikeTrim(0.5)" title="Automatically cut 0.5 seconds from both the start and end to remove camera/button start-stop spikes">
+            Cut 0.5s Start &amp; End Spike
+          </button>
+          <button type="button" onclick="applyQuickSpikeTrim(1.0)" title="Automatically cut 1.0 second from both the start and end">
+            Cut 1.0s Start &amp; End
+          </button>
+          <button type="button" onclick="resetTrimHandles()">
+            Reset Full Clip
+          </button>
+        </div>
+        <button type="button" id="btn-trim-preview-loop" onclick="previewTrimSelection()">
+          &#9654; Preview Selection
+        </button>
+      </div>
+
+      <div id="trim-status-msg" style="font-size: 0.82rem; color: var(--accent); margin-bottom: 0.65rem; display: none;"></div>
+
+      <div style="display: flex; gap: 0.6rem; flex-wrap: wrap; justify-content: flex-end;">
+        <button type="button" onclick="applyTrimToProcessTab()" title="Keep raw clip intact and open 3. Process with Trim Start &amp; Trim End pre-filled">
+          Use Range in Process (Non-Destructive)
+        </button>
+        <button type="button" id="btn-save-trimmed-clip" class="primary" onclick="savePermanentTrim()" title="Permanently trim this recording to the selected [Start, End] window">
+          &#9986; Save Trimmed Video
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MOTION STILL STUDIO MODAL -->
+  <div id="stills-modal" class="modal-backdrop">
+    <div class="modal-card" style="max-width: 760px;">
+      <div class="card-header">
+        <span class="card-title">&#127912; Motion Still Studio (Impossible Long-Exposure Photos)</span>
+        <button type="button" onclick="closeStillsModal()">Close</button>
+      </div>
+      <p id="stills-clip-subtitle" style="font-size: 0.84rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+        Collapse an entire video clip into a single long-exposure painting, stroboscopic sequence, or ghost-free background photo.
+      </p>
+
+      <div class="still-style-grid">
+        <button type="button" id="still-btn-chrono_paint" class="still-style-btn active" onclick="selectStillStyle('chrono_paint')">
+          <strong>Rainbow Motion Painting</strong>
+          <small>Time-coded color trails over crisp background</small>
+        </button>
+        <button type="button" id="still-btn-strobe_ghost" class="still-style-btn" onclick="selectStillStyle('strobe_ghost')">
+          <strong>Stroboscopic Multi-Exposure</strong>
+          <small>Edgerton freeze-frame motion sequence</small>
+        </button>
+        <button type="button" id="still-btn-median_bg" class="still-style-btn" onclick="selectStillStyle('median_bg')">
+          <strong>Crowd / Ghost Eraser</strong>
+          <small>Removes all moving objects cleanly</small>
+        </button>
+        <button type="button" id="still-btn-motion_trails" class="still-style-btn" onclick="selectStillStyle('motion_trails')">
+          <strong>Long-Exposure Glow</strong>
+          <small>Accumulates peak motion energy trails</small>
+        </button>
+      </div>
+
+      <div class="player-toolbar" style="margin-top: 0; margin-bottom: 0.75rem;">
+        <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+          <label style="margin: 0; font-size: 0.78rem;">
+            Sensitivity (<span id="still-sens-val">1.0</span>x):
+            <input id="still-sensitivity" type="range" min="0.4" max="3.0" step="0.2" value="1.0" style="width: 115px;" oninput="document.getElementById('still-sens-val').textContent = this.value" onchange="renderStillPreview()" />
+          </label>
+          <label id="still-strobe-count-wrap" style="margin: 0; font-size: 0.78rem; display: none;">
+            Strobe Steps:
+            <input id="still-strobe-count" type="number" min="4" max="16" step="1" value="8" style="width: 64px;" onchange="renderStillPreview()" />
+          </label>
+        </div>
+        <span id="still-status-text" style="font-size: 0.8rem; color: var(--accent);">Ready</span>
+      </div>
+
+      <div class="video-box" style="margin-bottom: 0.85rem; max-height: 390px; display: flex; justify-content: center; align-items: center; background: #020617;">
+        <img id="still-preview-img" alt="Rendered Motion Still" style="max-height: 380px; width: auto; max-width: 100%; display: block;" />
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <button type="button" onclick="renderStillPreview()">Re-Render Preview</button>
+        <a id="btn-download-still" class="btn primary" href="#" download="motion_still.png">
+          &#11015; Download High-Res PNG
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- CLIP DEEP INSPECTOR MODAL -->
+  <div id="frontier-modal" class="modal-backdrop">
+    <div class="modal-card" style="max-width: 840px;">
+      <div class="card-header">
+        <span class="card-title">&#128269; Clip Deep Inspector</span>
+        <button type="button" onclick="closeFrontierModal()">Close</button>
+      </div>
+      <p id="frontier-clip-subtitle" style="font-size: 0.84rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+        Pick one inspector tab below to read what it does, then click Run.
+      </p>
+
+      <div class="still-style-grid">
+        <button type="button" id="frontier-tab-dmd" class="still-style-btn active" onclick="selectFrontierTab('dmd')">
+          <strong>1. Auto-Find Vibrations</strong>
+          <small>Finds hidden shake frequencies automatically</small>
+        </button>
+        <button type="button" id="frontier-tab-fluid" class="still-style-btn" onclick="selectFrontierTab('fluid')">
+          <strong>2. Airflow &amp; Swirl Map</strong>
+          <small>Turns smoke, steam &amp; heat into flow lines</small>
+        </button>
+        <button type="button" id="frontier-tab-strain" class="still-style-btn" onclick="selectFrontierTab('strain')">
+          <strong>3. Flex &amp; Stress Map</strong>
+          <small>Shows where an object stretches or bends</small>
+        </button>
+        <button type="button" id="frontier-tab-rolling" class="still-style-btn" onclick="selectFrontierTab('rolling')">
+          <strong>4. Light Flicker &amp; Sound</strong>
+          <small>Detects hidden LED flicker &amp; scanline audio</small>
+        </button>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.65rem; gap: 0.5rem; flex-wrap: wrap;">
+        <span id="frontier-status-text" style="font-size: 0.8rem; color: var(--accent);">Ready — pick a tool and click Run</span>
+      </div>
+
+      <div id="frontier-result-body"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=19"></script>
 </body>
 </html>

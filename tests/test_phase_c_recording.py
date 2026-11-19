@@ -91,3 +91,85 @@ def test_live_preview_and_lossless_recording(
     assert len(listed) == 1
     assert listed[0]["clip_id"] == meta["clip_id"]
 
+    # Trim 0.3s off the start and 0.3s off the end (2.0s -> ~1.4s)
+    trimmed_meta = rec.trim_clip(meta["clip_id"], start_s=0.3, end_s=1.7)
+    assert 38 <= trimmed_meta["frame_count"] <= 46
+    t_frames, t_sec_trimmed, _ = load_clip_frames_and_timestamps(clip_dir)
+    assert len(t_frames) == trimmed_meta["frame_count"]
+    assert len(t_sec_trimmed) == trimmed_meta["frame_count"]
+    cam_mgr.shutdown()
+
+
+def test_preview_isolation_during_recording(
+    app_settings: AppSettings, data_layout: DataLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    cam_mgr = CameraManager(app_settings, realtime_synthetic=False)
+    preview = LivePreviewService(cam_mgr)
+    cam = cam_mgr.get_active()
+
+    def _fail_get_frame(*_args, **_kwargs):
+        raise AssertionError("Preview must not call cam.get_frame() while recording is active")
+
+    monkeypatch.setattr(cam, "get_frame", _fail_get_frame)
+    preview.set_recording_active(True)
+    dummy_bgr = np.full((96, 128, 3), 120, dtype=np.uint8)
+    preview.publish_recording_frame(dummy_bgr)
+
+    jpg = preview.grab_preview_jpeg(draw_roi=False)
+    assert jpg.startswith(b"\xff\xd8")
+    preview.set_recording_active(False)
+    preview.shutdown()
+    cam_mgr.shutdown()
+
+
+def test_unambiguous_trim_and_dual_cam_trim_preservation(
+    app_settings: AppSettings, data_layout: DataLayout
+) -> None:
+    import csv
+
+    import cv2
+    import numpy as np
+
+    db = Database(data_layout.db_path)
+    cam_mgr = CameraManager(app_settings, realtime_synthetic=False)
+    preview = LivePreviewService(cam_mgr)
+    rec = RecordingService(layout=data_layout, db=db, camera_manager=cam_mgr, preview_service=preview)
+
+    meta = rec.record_clip(
+        title="Dual Trim Test",
+        duration_s=2.0,
+        width=128,
+        height=96,
+        fps=30,
+        storage_format="mjpeg_q100",
+        dual_camera=True,
+    )
+    clip_dir = data_layout.clip_dir(meta["clip_id"])
+
+    # Trimming 0.8s from start AND 0.8s from end of a ~2.0s clip leaves ~0.4s (10-15 frames)
+    mid_frames, _ts_mid, _fps_mid = load_clip_frames_and_timestamps(
+        clip_dir, trim_start_s=0.8, trim_end_s=0.8
+    )
+    assert 8 <= len(mid_frames) <= 16
+
+    trimmed_meta = rec.trim_clip(meta["clip_id"], start_s=0.3, end_s=1.7)
+    assert 38 <= trimmed_meta["frame_count"] <= 46
+
+    with (clip_dir / "timestamps.csv").open("r", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == trimmed_meta["frame_count"]
+    assert "timestamp_b_monotonic_ns" in rows[0]
+    assert "sync_dt_ms" in rows[0]
+
+    with np.load(clip_dir / "raw_frames.npz") as npz:
+        assert len(npz["frames"]) == trimmed_meta["frame_count"]
+        assert len(npz["frames_b"]) == trimmed_meta["frame_count"]
+
+    thumb = cv2.imread(str(clip_dir / "thumb.jpg"))
+    assert thumb is not None
+    assert thumb.shape[1] == 256  # dual SBS thumbnail preserved (128 * 2)
+    preview.shutdown()
+    cam_mgr.shutdown()
+

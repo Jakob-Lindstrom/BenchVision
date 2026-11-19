@@ -65,13 +65,19 @@ MOTION_ENERGY_SCALE = 2  # motion energy is stored at 1/2 resolution (1/4 RAM)
 
 
 def alloc_motion_energy(n_frames: int, h: int, w: int) -> np.ndarray:
-    """Allocate a half-resolution (T, H/2, W/2) float32 motion-energy buffer.
+    """Allocate a motion-energy buffer scaled to the active Pi hardware tier.
 
-    Storing motion energy at full resolution costs 4 bytes/pixel/frame (e.g. 340 MB for a
-    12 s 640x385 clip), which was enough to trigger the Linux OOM killer on a 2 GB Pi 4.
+    - On Raspberry Pi 5 (8GB+ RAM), allocates full-resolution (T, H, W) float32 for maximum
+      spatial precision on heatmaps and epicenter localization.
+    - On Raspberry Pi 4 (2GB/4GB RAM), allocates half-resolution (T, H/2, W/2) float32 (1/4 RAM)
+      to prevent OOM while preserving sub-pixel motion patterns.
     """
-    mh = max(1, (h + MOTION_ENERGY_SCALE - 1) // MOTION_ENERGY_SCALE)
-    mw = max(1, (w + MOTION_ENERGY_SCALE - 1) // MOTION_ENERGY_SCALE)
+    from src.core.hardware import detect_hardware_profile
+
+    scale = int(detect_hardware_profile().get("motion_energy_scale", MOTION_ENERGY_SCALE))
+    scale = max(1, scale)
+    mh = max(1, (h + scale - 1) // scale)
+    mw = max(1, (w + scale - 1) // scale)
     return np.zeros((n_frames, mh, mw), dtype=np.float32)
 
 

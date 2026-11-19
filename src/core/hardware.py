@@ -79,6 +79,155 @@ def compute_mm_per_pixel(
     return scene_width_mm / float(max(frame_width_px, 1))
 
 
+def build_hardware_profile(
+    model_str: str,
+    total_ram_bytes: int,
+    avail_ram_bytes: int | None = None,
+    cpu_cores: int | None = None,
+    telemetry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute hardware tier, adaptive processing widths, and Deep Inspector RAM budgets."""
+    total_ram_gb = round(total_ram_bytes / (1024**3), 2)
+    available_ram_gb = round((avail_ram_bytes or total_ram_bytes) / (1024**3), 2)
+    eff_cores = cpu_cores if cpu_cores is not None else (os.cpu_count() or 4)
+    is_pi5 = "Raspberry Pi 5" in model_str
+    is_pi4 = "Raspberry Pi 4" in model_str
+    low_memory_mode = total_ram_gb < 3.5
+
+    # Adaptive hardware tiering so Pi 5 (8GB) runs unthrottled while Pi 4 (2GB) stays OOM-safe:
+    # - ultra:       Pi 5 (8GB+ RAM) -> 1920px Full HD, 5 pyramid levels, 1:1 motion energy, full Deep Inspector depth
+    # - high:        Pi 5 (4GB RAM) or Pi 4 (8GB RAM) -> 1280px HD, 4 pyramid levels, high-res Inspector
+    # - balanced:    Pi 4 (4GB RAM) -> 960px, 4 pyramid levels, 1/2 motion energy, balanced Inspector
+    # - constrained: Pi 4 (2GB RAM) -> 640px, 4 pyramid levels, strict low-RAM streaming Inspector budgets
+    if is_pi5 and total_ram_gb >= 7.0:
+        performance_tier = "ultra"
+        recommended_max_width = 1920
+        recommended_pyramid_levels = 5
+        motion_energy_scale = 1
+        quiver_sub_scale = 2
+        sbs_panel_width = 960
+        fft_zero_pad_factor = 8
+        inspector_budgets = {
+            "still_max_width": 1920,
+            "still_max_frames": 80,
+            "dmd_max_dim": 224,
+            "dmd_max_frames": 240,
+            "dmd_max_rank": 18,
+            "fluid_max_width": 640,
+            "fluid_pairs": 24,
+            "strain_max_width": 640,
+            "strain_scan_frames": 40,
+            "rolling_max_width": 1080,
+            "rolling_frames": 48,
+            "rolling_wav_frames": 64,
+            "autoband_max_width": 480,
+            "autoband_max_frames": 360,
+        }
+    elif (is_pi5 and total_ram_gb >= 3.5) or total_ram_gb >= 7.0:
+        performance_tier = "high"
+        recommended_max_width = 1280
+        recommended_pyramid_levels = 4
+        motion_energy_scale = 1 if total_ram_gb >= 7.0 else 2
+        quiver_sub_scale = 2 if is_pi5 else 3
+        sbs_panel_width = 640
+        fft_zero_pad_factor = 6
+        inspector_budgets = {
+            "still_max_width": 1280,
+            "still_max_frames": 64,
+            "dmd_max_dim": 160,
+            "dmd_max_frames": 160,
+            "dmd_max_rank": 16,
+            "fluid_max_width": 480,
+            "fluid_pairs": 16,
+            "strain_max_width": 480,
+            "strain_scan_frames": 30,
+            "rolling_max_width": 720,
+            "rolling_frames": 36,
+            "rolling_wav_frames": 48,
+            "autoband_max_width": 360,
+            "autoband_max_frames": 240,
+        }
+    elif total_ram_gb >= 3.5:
+        performance_tier = "balanced"
+        recommended_max_width = 960
+        recommended_pyramid_levels = 4
+        motion_energy_scale = 2
+        quiver_sub_scale = 3
+        sbs_panel_width = 640
+        fft_zero_pad_factor = 4
+        inspector_budgets = {
+            "still_max_width": 800,
+            "still_max_frames": 48,
+            "dmd_max_dim": 128,
+            "dmd_max_frames": 120,
+            "dmd_max_rank": 14,
+            "fluid_max_width": 360,
+            "fluid_pairs": 12,
+            "strain_max_width": 360,
+            "strain_scan_frames": 24,
+            "rolling_max_width": 480,
+            "rolling_frames": 28,
+            "rolling_wav_frames": 36,
+            "autoband_max_width": 320,
+            "autoband_max_frames": 200,
+        }
+    else:
+        performance_tier = "constrained"
+        recommended_max_width = 640
+        recommended_pyramid_levels = 4
+        motion_energy_scale = 2
+        quiver_sub_scale = 4
+        sbs_panel_width = 480
+        fft_zero_pad_factor = 4
+        inspector_budgets = {
+            "still_max_width": 540,
+            "still_max_frames": 48,
+            "dmd_max_dim": 96,
+            "dmd_max_frames": 90,
+            "dmd_max_rank": 14,
+            "fluid_max_width": 240,
+            "fluid_pairs": 10,
+            "strain_max_width": 240,
+            "strain_scan_frames": 21,
+            "rolling_max_width": 360,
+            "rolling_frames": 24,
+            "rolling_wav_frames": 32,
+            "autoband_max_width": 240,
+            "autoband_max_frames": 180,
+        }
+
+    # Pi 5 has RP1 southbridge + Cortex-A76 (~2.6x faster SIMD/NEON than Pi 4 Cortex-A72)
+    speed_multiplier = 2.6 if is_pi5 else 1.0
+    chunk_cols = 32768 if total_ram_gb >= 7.0 else (16384 if total_ram_gb >= 3.5 else 4096)
+    strip_rows = 256 if total_ram_gb >= 7.0 else (128 if total_ram_gb >= 3.5 else 64)
+    therm = telemetry if telemetry is not None else read_pi_thermal_telemetry()
+
+    return {
+        "model": model_str,
+        "is_pi4": is_pi4,
+        "is_pi5": is_pi5,
+        "performance_tier": performance_tier,
+        "architecture": platform.machine(),
+        "cpu_cores": eff_cores,
+        "cpu_count": eff_cores,
+        "total_ram_bytes": total_ram_bytes,
+        "total_ram_gb": total_ram_gb,
+        "available_ram_gb": available_ram_gb,
+        "low_memory_mode": low_memory_mode,
+        "speed_multiplier": speed_multiplier,
+        "chunk_cols": chunk_cols,
+        "strip_rows": strip_rows,
+        "recommended_max_width": recommended_max_width,
+        "recommended_pyramid_levels": recommended_pyramid_levels,
+        "motion_energy_scale": motion_energy_scale,
+        "quiver_sub_scale": quiver_sub_scale,
+        "sbs_panel_width": sbs_panel_width,
+        "fft_zero_pad_factor": fft_zero_pad_factor,
+        "inspector_budgets": inspector_budgets,
+        **therm,
+    }
+
+
 def detect_hardware_profile() -> dict[str, Any]:
     """Detect Pi model (Pi 4 vs Pi 5), total RAM, and adaptive processing tuning parameters."""
     model_str = "Generic Linux Host"
@@ -90,6 +239,7 @@ def detect_hardware_profile() -> dict[str, Any]:
             pass
 
     total_ram_bytes = 2 * (1024**3)
+    avail_ram_bytes: int | None = None
     meminfo = Path("/proc/meminfo")
     if meminfo.exists():
         try:
@@ -97,41 +247,18 @@ def detect_hardware_profile() -> dict[str, Any]:
                 if line.startswith("MemTotal:"):
                     kb = int(line.split()[1])
                     total_ram_bytes = kb * 1024
-                    break
+                elif line.startswith("MemAvailable:"):
+                    kb_avail = int(line.split()[1])
+                    avail_ram_bytes = kb_avail * 1024
         except (OSError, ValueError, IndexError):
             pass
 
-    total_ram_gb = round(total_ram_bytes / (1024**3), 2)
-    cpu_cores = os.cpu_count() or 4
-    is_pi5 = "Raspberry Pi 5" in model_str
-    is_pi4 = "Raspberry Pi 4" in model_str
-    low_memory_mode = total_ram_gb < 3.5
-
-    # Pi 5 has RP1 southbridge + Cortex-A76 (~2.6x faster SIMD/NEON than Pi 4 Cortex-A72)
-    speed_multiplier = 2.6 if is_pi5 else 1.0
-    chunk_cols = 16384 if total_ram_gb >= 4.0 else 4096
-    strip_rows = 128 if total_ram_gb >= 4.0 else 64
-    recommended_max_width = 1280 if (is_pi5 and total_ram_gb >= 4.0) else 640
-
-    telemetry = read_pi_thermal_telemetry()
-
-    return {
-        "model": model_str,
-        "is_pi4": is_pi4,
-        "is_pi5": is_pi5,
-        "architecture": platform.machine(),
-        "cpu_cores": cpu_cores,
-        "cpu_count": cpu_cores,
-        "total_ram_bytes": total_ram_bytes,
-        "total_ram_gb": total_ram_gb,
-        "available_ram_gb": total_ram_gb,
-        "low_memory_mode": low_memory_mode,
-        "speed_multiplier": speed_multiplier,
-        "chunk_cols": chunk_cols,
-        "strip_rows": strip_rows,
-        "recommended_max_width": recommended_max_width,
-        **telemetry,
-    }
+    return build_hardware_profile(
+        model_str=model_str,
+        total_ram_bytes=total_ram_bytes,
+        avail_ram_bytes=avail_ram_bytes,
+        cpu_cores=os.cpu_count() or 4,
+    )
 
 
 def evaluate_dual_camera_tier(

@@ -8,9 +8,12 @@ import json
 import logging
 import shutil
 import struct
+import subprocess
 import threading
+import time
 import uuid
-from collections.abc import Iterable
+import zipfile
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,8 +21,10 @@ from typing import Any
 
 import cv2
 import numpy as np
+from numpy.lib import format as nlf
 
 from src.cameras.manager import CameraManager
+from src.core.hardware import detect_hardware_profile
 from src.recording.preview import LivePreviewService
 from src.storage.db import Database
 from src.storage.layout import DataLayout
@@ -111,6 +116,54 @@ def fix_v4l2m2m_mp4_bytes(data: bytes) -> bytes:
     return bytes(ba)
 
 
+def _encode_ffv1_mkv(
+    frames_bgr: list[np.ndarray] | np.ndarray, fps: float, out_path: Path
+) -> bool:
+    """Encode BGR frames into a lossless FFV1 MKV file via ffmpeg. Returns True on success."""
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin or len(frames_bgr) == 0:
+        return False
+    h, w = frames_bgr[0].shape[:2]
+    cmd = [
+        ffmpeg_bin,
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{w}x{h}",
+        "-r",
+        f"{max(fps, 1.0):.3f}",
+        "-i",
+        "pipe:0",
+        "-c:v",
+        "ffv1",
+        "-level",
+        "3",
+        "-g",
+        "1",
+        "-y",
+        str(out_path),
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+        for frm in frames_bgr:
+            proc.stdin.write(np.ascontiguousarray(frm, dtype=np.uint8).tobytes())
+        proc.stdin.close()
+        _out, _err = proc.communicate(timeout=45.0)
+        return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 128
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def encode_browser_mp4(
     frames_bgr: Iterable[np.ndarray], fps: float, out_path: Path
 ) -> Path:
@@ -153,6 +206,205 @@ def encode_browser_mp4(
     return out_path
 
 
+def _inspect_npz_array(
+    npz_path: Path, key: str
+) -> tuple[str, tuple[int, ...], np.dtype[Any], bool, bool, int]:
+    """Read shape and layout of an array inside an .npz archive without loading pixels."""
+    with zipfile.ZipFile(npz_path, "r") as zf:
+        names = set(zf.namelist())
+        member = f"{key}.npy" if f"{key}.npy" in names else "frames.npy"
+        info = zf.getinfo(member)
+        with zf.open(info, "r") as fp:
+            ver = nlf.read_magic(fp)
+            if ver == (1, 0):
+                shape, fortran, dtype = nlf.read_array_header_1_0(fp)
+            elif ver == (2, 0):
+                shape, fortran, dtype = nlf.read_array_header_2_0(fp)
+            else:
+                raise ValueError(f"Unsupported NPY version {ver} in {npz_path}")
+            data_offset = fp.tell()
+            can_seek = info.compress_type == zipfile.ZIP_STORED and fp.seekable()
+    return member, tuple(int(d) for d in shape), np.dtype(dtype), bool(fortran), can_seek, int(data_offset)
+
+
+def _compute_crop_and_output_size(
+    h0: int,
+    w0: int,
+    roi: tuple[int, int, int, int] | None,
+    max_width: int | None,
+) -> tuple[tuple[int, int, int, int] | None, int, int]:
+    """Compute bounded ROI crop coordinates and proportional resize output size."""
+    crop_box: tuple[int, int, int, int] | None = None
+    crop_h, crop_w = h0, w0
+    if roi and len(roi) == 4:
+        rx, ry, rw, rh = roi
+        min_w = min(16, w0)
+        min_h = min(16, h0)
+        x0 = max(0, min(int(rx), w0 - min_w))
+        y0 = max(0, min(int(ry), h0 - min_h))
+        x1 = max(x0 + min_w, min(x0 + int(rw), w0))
+        y1 = max(y0 + min_h, min(y0 + int(rh), h0))
+        crop_box = (x0, y0, x1, y1)
+        crop_h = y1 - y0
+        crop_w = x1 - x0
+
+    if max_width and crop_w > max_width:
+        scale = float(max_width) / float(crop_w)
+        out_w = int(max_width)
+        out_h = max(8, round(crop_h * scale))
+    else:
+        out_w = crop_w
+        out_h = crop_h
+    return crop_box, out_h, out_w
+
+
+def _transform_single_frame(
+    frame: np.ndarray,
+    crop_box: tuple[int, int, int, int] | None,
+    out_w: int,
+    out_h: int,
+) -> np.ndarray:
+    """Crop ROI and resize a single BGR frame."""
+    if crop_box is not None:
+        x0, y0, x1, y1 = crop_box
+        frame = frame[y0:y1, x0:x1, :]
+    if frame.shape[1] != out_w or frame.shape[0] != out_h:
+        frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    return frame
+
+
+def _stream_npz_frames(
+    npz_path: Path,
+    key: str,
+    roi: tuple[int, int, int, int] | None,
+    max_width: int | None,
+    keep_indices: list[int],
+) -> np.ndarray:
+    """Stream selected frames one by one from raw_frames.npz without loading the full archive."""
+    member, shape, dtype, fortran, can_seek, data_offset = _inspect_npz_array(npz_path, key)
+    if fortran or len(shape) != 4:
+        with np.load(npz_path) as data:
+            arr = data[key] if (key in data) else data["frames"]
+            if keep_indices:
+                arr = arr[keep_indices]
+            crop_box, out_h, out_w = _compute_crop_and_output_size(
+                arr.shape[1], arr.shape[2], roi, max_width
+            )
+            out = np.empty((len(arr), out_h, out_w, arr.shape[3]), dtype=arr.dtype)
+            for idx_i, f in enumerate(arr):
+                out[idx_i] = _transform_single_frame(f, crop_box, out_w, out_h)
+            return out
+
+    n_total, h0, w0, c0 = shape
+    crop_box, out_h, out_w = _compute_crop_and_output_size(h0, w0, roi, max_width)
+    if not keep_indices:
+        return np.empty((0, out_h, out_w, c0), dtype=dtype)
+
+    frame_shape = (h0, w0, c0)
+    frame_nbytes = h0 * w0 * c0 * dtype.itemsize
+    out = np.empty((len(keep_indices), out_h, out_w, c0), dtype=dtype)
+
+    with zipfile.ZipFile(npz_path, "r") as zf:
+        info = zf.getinfo(member)
+        with zf.open(info, "r") as fp:
+            if can_seek:
+                for out_i, f_idx in enumerate(keep_indices):
+                    f_clamped = max(0, min(n_total - 1, int(f_idx)))
+                    fp.seek(data_offset + f_clamped * frame_nbytes)
+                    raw = fp.read(frame_nbytes)
+                    if len(raw) < frame_nbytes:
+                        raise EOFError(
+                            f"Unexpected EOF reading frame {f_clamped} from {npz_path}"
+                        )
+                    frm = np.frombuffer(raw, dtype=dtype).reshape(frame_shape)
+                    out[out_i] = _transform_single_frame(frm, crop_box, out_w, out_h)
+            else:
+                # Re-open cleanly and skip uncompressed NPY header + unrequested frames sequentially
+                with zf.open(info, "r") as seq_fp:
+                    ver = nlf.read_magic(seq_fp)
+                    if ver == (1, 0):
+                        nlf.read_array_header_1_0(seq_fp)
+                    else:
+                        nlf.read_array_header_2_0(seq_fp)
+                    want_map: dict[int, list[int]] = {}
+                    for out_i, f_idx in enumerate(keep_indices):
+                        want_map.setdefault(int(f_idx), []).append(out_i)
+                    max_idx = max(want_map.keys())
+                    for cur_idx in range(min(n_total, max_idx + 1)):
+                        raw = seq_fp.read(frame_nbytes)
+                        if len(raw) < frame_nbytes:
+                            break
+                        if cur_idx in want_map:
+                            frm = np.frombuffer(raw, dtype=dtype).reshape(frame_shape)
+                            transformed = _transform_single_frame(frm, crop_box, out_w, out_h)
+                            for out_i in want_map[cur_idx]:
+                                out[out_i] = transformed
+    return out
+
+
+def _stream_video_frames(
+    video_file: Path,
+    roi: tuple[int, int, int, int] | None,
+    max_width: int | None,
+    keep_set: set[int] | None,
+    max_stop_idx: int | None = None,
+) -> np.ndarray:
+    """Decode only selected video frames and resize inline to keep peak RAM minimal."""
+    cap = cv2.VideoCapture(str(video_file))
+    frame_list: list[np.ndarray] = []
+    crop_box: tuple[int, int, int, int] | None = None
+    out_w = 0
+    out_h = 0
+    idx = 0
+    try:
+        while True:
+            if max_stop_idx is not None and idx > max_stop_idx:
+                break
+            ok, bgr = cap.read()
+            if not ok or bgr is None:
+                break
+            if keep_set is None or idx in keep_set:
+                if out_w == 0:
+                    crop_box, out_h, out_w = _compute_crop_and_output_size(
+                        bgr.shape[0], bgr.shape[1], roi, max_width
+                    )
+                frame_list.append(_transform_single_frame(bgr, crop_box, out_w, out_h))
+            idx += 1
+    finally:
+        cap.release()
+    if not frame_list:
+        raise FileNotFoundError(f"Could not decode frames from {video_file}")
+    return np.stack(frame_list, axis=0)
+
+
+def get_clip_frame_count(clip_dir: Path, stream: str = "cam_a") -> int:
+    """Return total frame count of a clip in O(1) without decoding or loading pixel buffers."""
+    clip_dir = Path(clip_dir).resolve()
+    npz_path = clip_dir / "raw_frames.npz"
+    if npz_path.exists():
+        with contextlib.suppress(Exception):
+            key = "frames_b" if stream == "cam_b" else "frames"
+            _m, shape, _dt, _ft, _sk, _off = _inspect_npz_array(npz_path, key)
+            if len(shape) >= 1 and shape[0] > 0:
+                return int(shape[0])
+
+    meta_path = clip_dir / "meta.json"
+    if meta_path.exists():
+        with contextlib.suppress(Exception):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            fc = int(meta.get("frame_count") or 0)
+            if fc > 0:
+                return fc
+
+    ts_path = clip_dir / "timestamps.csv"
+    if ts_path.exists():
+        with contextlib.suppress(Exception):
+            lines = ts_path.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 1:
+                return len(lines) - 1
+    return 0
+
+
 def load_clip_frames_and_timestamps(
     clip_dir: Path,
     roi: tuple[int, int, int, int] | None = None,
@@ -160,8 +412,10 @@ def load_clip_frames_and_timestamps(
     trim_start_s: float = 0.0,
     trim_end_s: float = 0.0,
     stream: str = "cam_a",
+    max_frames: int | None = None,
+    selected_indices: Sequence[int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Load unmodified raw clip frames (T, H, W, 3) and timestamps (s), returning true achieved FPS."""
+    """Stream raw clip frames (T, H, W, 3) and timestamps (s), avoiding full-archive RAM spikes."""
     clip_dir = Path(clip_dir).resolve()
     ts_path = clip_dir / "timestamps.csv"
     timestamps_ns: list[int] = []
@@ -173,96 +427,127 @@ def load_clip_frames_and_timestamps(
                 val_str = row.get(col_key) or row.get("timestamp_monotonic_ns") or "0"
                 timestamps_ns.append(int(val_str))
 
-    npz_path = clip_dir / "raw_frames.npz"
-    if npz_path.exists():
-        with np.load(npz_path) as data:
-            if stream == "cam_b" and "frames_b" in data:
-                frames = data["frames_b"]
-            else:
-                frames = data["frames"]
-    else:
-        cand_names = (
-            ("raw_b.avi", "preview_b.mp4", "raw.mkv", "raw.avi", "preview.mp4")
-            if stream == "cam_b"
-            else ("raw.mkv", "raw.avi", "preview.mp4")
-        )
-        video_file = next(
-            (
-                clip_dir / name
-                for name in cand_names
-                if (clip_dir / name).exists()
-            ),
-            None,
-        )
-        if video_file is None:
-            raise FileNotFoundError(f"No raw recording found in {clip_dir}")
-        cap = cv2.VideoCapture(str(video_file))
-        frame_list: list[np.ndarray] = []
-        while True:
-            ok, bgr = cap.read()
-            if not ok or bgr is None:
-                break
-            frame_list.append(bgr)
-        cap.release()
-        frames = np.stack(frame_list, axis=0)
-
-    if roi and len(roi) == 4:
-        rx, ry, rw, rh = roi
-        h, w = frames.shape[1:3]
-        min_w = min(16, w)
-        min_h = min(16, h)
-        x0 = max(0, min(rx, w - min_w))
-        y0 = max(0, min(ry, h - min_h))
-        x1 = max(x0 + min_w, min(x0 + rw, w))
-        y1 = max(y0 + min_h, min(y0 + rh, h))
-        frames = frames[:, y0:y1, x0:x1, :]
-
-    if max_width and frames.shape[2] > max_width:
-        scale = max_width / float(frames.shape[2])
-        new_h = max(8, round(frames.shape[1] * scale))
-        resized = [
-            cv2.resize(f, (max_width, new_h), interpolation=cv2.INTER_AREA) for f in frames
-        ]
-        frames = np.stack(resized, axis=0)
-
     meta_path = clip_dir / "meta.json"
     target_fps = 30.0
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         target_fps = float(meta.get("target_fps", 30.0))
 
-    n = len(frames)
-    if len(timestamps_ns) >= 2:
-        t_sec = (np.array(timestamps_ns[:n], dtype=np.float64) - timestamps_ns[0]) / 1e9
-        dt = np.diff(t_sec)
+    npz_path = clip_dir / "raw_frames.npz"
+    npz_key = "frames_b" if stream == "cam_b" else "frames"
+    video_file: Path | None = None
+    n_total = 0
+
+    if npz_path.exists():
+        try:
+            _m, shape, _dt, _ft, _sk, _off = _inspect_npz_array(npz_path, npz_key)
+            n_total = int(shape[0])
+        except Exception:  # noqa: BLE001
+            with np.load(npz_path) as data:
+                arr = data[npz_key] if npz_key in data else data["frames"]
+                n_total = int(arr.shape[0])
+    else:
+        cand_names = (
+            ("raw_b.mkv", "raw_b.avi", "preview_b.mp4", "raw.mkv", "raw.avi", "preview.mp4")
+            if stream == "cam_b"
+            else ("raw.mkv", "raw.avi", "preview.mp4")
+        )
+        video_file = next(
+            (clip_dir / name for name in cand_names if (clip_dir / name).exists()),
+            None,
+        )
+        if video_file is None:
+            raise FileNotFoundError(f"No raw recording found in {clip_dir}")
+        cap = cv2.VideoCapture(str(video_file))
+        try:
+            cap_n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            cap.release()
+        n_total = cap_n if cap_n > 0 else len(timestamps_ns)
+
+    if n_total > 0 and len(timestamps_ns) >= 2:
+        t_sec_full = (np.array(timestamps_ns[:n_total], dtype=np.float64) - timestamps_ns[0]) / 1e9
+        dt = np.diff(t_sec_full)
         nonzero_dt = dt[dt > 0.001]
-        if len(nonzero_dt) >= max(2, n // 3):
+        if len(nonzero_dt) >= max(2, n_total // 3):
             achieved_fps = float(1.0 / np.mean(dt)) if np.mean(dt) > 0 else target_fps
         else:
             achieved_fps = target_fps
-            t_sec = np.arange(n, dtype=np.float64) / achieved_fps
+            t_sec_full = np.arange(n_total, dtype=np.float64) / achieved_fps
+    elif n_total > 0:
+        achieved_fps = target_fps
+        t_sec_full = np.arange(n_total, dtype=np.float64) / achieved_fps
     else:
         achieved_fps = target_fps
-        t_sec = np.arange(n, dtype=np.float64) / achieved_fps
+        t_sec_full = np.empty(0, dtype=np.float64)
 
-    if (trim_start_s > 0.0 or trim_end_s > 0.0) and len(frames) > 10:
-        total_dur = float(t_sec[-1] - t_sec[0]) if len(t_sec) > 1 else (len(frames) / achieved_fps)
-        t0 = max(0.0, float(trim_start_s))
-        # Support trim_end_s as either seconds to trim off the tail (e.g. 0.5s) or an end timestamp (e.g. 6.5s)
-        if trim_end_s > 0.0:
-            if t0 + trim_end_s < total_dur - 0.4:
-                t1 = total_dur - float(trim_end_s)
-            elif trim_end_s > t0 + 0.4:
-                t1 = float(trim_end_s)
-            else:
-                t1 = total_dur
+    if n_total > 0:
+        valid_idxs = list(range(n_total))
+        t_sec_base = t_sec_full
+        if (trim_start_s > 0.0 or trim_end_s > 0.0) and n_total > 10:
+            total_dur = (
+                float(t_sec_full[-1] - t_sec_full[0])
+                if len(t_sec_full) > 1
+                else (n_total / achieved_fps)
+            )
+            t0 = max(0.0, float(trim_start_s))
+            t1 = max(t0 + 0.25, total_dur - float(trim_end_s)) if trim_end_s > 0.0 else total_dur
+            t1 = min(total_dur, t1)
+            mask = (t_sec_full >= t0) & (t_sec_full <= t1)
+            if int(np.sum(mask)) >= 8:
+                valid_idxs = [int(i) for i in np.flatnonzero(mask)]
+                t_sec_base = t_sec_full[mask] - float(t_sec_full[mask][0])
+
+        effective_fps = achieved_fps
+        if selected_indices is not None:
+            pos_list = sorted(
+                {max(0, min(len(valid_idxs) - 1, int(i))) for i in selected_indices}
+            )
+            keep_raw = [valid_idxs[p] for p in pos_list]
+            t_sec_out = t_sec_base[pos_list]
+        elif max_frames is not None and len(valid_idxs) > max(2, int(max_frames)):
+            stride = max(1, len(valid_idxs) // int(max_frames))
+            pos_list = list(range(0, len(valid_idxs), stride))
+            keep_raw = [valid_idxs[p] for p in pos_list]
+            t_sec_out = t_sec_base[pos_list]
+            effective_fps = achieved_fps / float(stride)
         else:
-            t1 = total_dur
-        mask = (t_sec >= t0) & (t_sec <= t1)
-        if int(np.sum(mask)) >= 8:
-            frames = frames[mask]
-            t_sec = t_sec[mask] - float(t_sec[mask][0])
+            keep_raw = valid_idxs
+            t_sec_out = t_sec_base
+    else:
+        keep_raw = []
+        t_sec_out = np.empty(0, dtype=np.float64)
+        effective_fps = achieved_fps
 
+    if npz_path.exists():
+        frames = _stream_npz_frames(npz_path, npz_key, roi=roi, max_width=max_width, keep_indices=keep_raw)
+        return frames, t_sec_out, effective_fps
+
+    assert video_file is not None
+    if keep_raw:
+        keep_set: set[int] | None = set(keep_raw) if len(keep_raw) < n_total else None
+        max_stop = max(keep_raw) if keep_set is not None else None
+        frames = _stream_video_frames(
+            video_file, roi=roi, max_width=max_width, keep_set=keep_set, max_stop_idx=max_stop
+        )
+        if len(t_sec_out) != len(frames):
+            t_sec_out = np.arange(len(frames), dtype=np.float64) / effective_fps
+        return frames, t_sec_out, effective_fps
+
+    frames = _stream_video_frames(video_file, roi=roi, max_width=max_width, keep_set=None)
+    n_dec = len(frames)
+    if len(timestamps_ns) >= 2:
+        t_sec = (np.array(timestamps_ns[:n_dec], dtype=np.float64) - timestamps_ns[0]) / 1e9
+        dt = np.diff(t_sec)
+        nonzero_dt = dt[dt > 0.001]
+        if len(nonzero_dt) >= max(2, n_dec // 3):
+            achieved_fps = float(1.0 / np.mean(dt)) if np.mean(dt) > 0 else target_fps
+        else:
+            achieved_fps = target_fps
+            t_sec = np.arange(n_dec, dtype=np.float64) / achieved_fps
+    else:
+        achieved_fps = target_fps
+        t_sec = np.arange(n_dec, dtype=np.float64) / achieved_fps
     return frames, t_sec, achieved_fps
 
 
@@ -282,8 +567,17 @@ class RecordingService:
         self.preview_service = preview_service
         self._lock = threading.Lock()
         self.is_recording = False
+        self._stop_requested = False
         self.current_clip_id: str | None = None
         self.progress: float = 0.0
+
+    def request_stop(self) -> bool:
+        """Signal an active recording to finish early and save captured frames."""
+        with self._lock:
+            if not self.is_recording:
+                return False
+            self._stop_requested = True
+            return True
 
     def record_clip(
         self,
@@ -305,7 +599,11 @@ class RecordingService:
             if self.is_recording:
                 raise RuntimeError("A recording is already in progress.")
             self.is_recording = True
+            self._stop_requested = False
             self.progress = 0.0
+
+        if self.preview_service is not None:
+            self.preview_service.set_recording_active(True)
 
         try:
             dual_on = (
@@ -415,6 +713,7 @@ class RecordingService:
 
             post_start_mono_ns: int | None = None
             post_start_wall_ns: int | None = None
+            last_preview_push = 0.0
             pool = ThreadPoolExecutor(max_workers=2) if cam_b is not None else None
             try:
                 for idx in range(target_frames):
@@ -467,8 +766,14 @@ class RecordingService:
 
                     if self.preview_service is not None:
                         self.preview_service.record_roi_sample(pkt.bgr, pkt.timestamp_monotonic_ns)
+                        now_m = time.monotonic()
+                        if now_m - last_preview_push >= 0.08 or idx == 0:
+                            self.preview_service.publish_recording_frame(pkt.bgr)
+                            last_preview_push = now_m
 
                     self.progress = round((idx + 1) / float(target_frames), 3)
+                    if self._stop_requested and len(frames_bgr) >= 8:
+                        break
                     if is_hw_cam and post_start_mono_ns is not None and idx >= 3:
                         elapsed_post_s = (pkt.timestamp_monotonic_ns - post_start_mono_ns) / 1e9
                         if elapsed_post_s >= duration_s:
@@ -523,25 +828,39 @@ class RecordingService:
 
             # Step 3: Save lossless frame archive + video container + thumbnail
             frame_stack = np.stack(frames_bgr, axis=0)
-            npz_path = clip_dir / "raw_frames.npz"
-            if dual_on and frames_b_bgr:
-                frame_stack_b = np.stack(frames_b_bgr, axis=0)
-                if storage_format == "raw_npz":
-                    np.savez_compressed(npz_path, frames=frame_stack, frames_b=frame_stack_b)
-                else:
-                    np.savez(npz_path, frames=frame_stack, frames_b=frame_stack_b)
-            elif storage_format == "raw_npz":
-                np.savez_compressed(npz_path, frames=frame_stack)
-            else:
-                np.savez(npz_path, frames=frame_stack)
-
             eff_h, eff_w = frame_stack.shape[1:3]
-            raw_avi_path = clip_dir / "raw.avi"
-            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-            vw = cv2.VideoWriter(str(raw_avi_path), fourcc, achieved_fps, (eff_w, eff_h))
-            for f in frames_bgr:
-                vw.write(f)
-            vw.release()
+            npz_path = clip_dir / "raw_frames.npz"
+
+            wrote_ffv1 = False
+            if storage_format == "ffv1_mkv":
+                wrote_ffv1 = _encode_ffv1_mkv(frame_stack, achieved_fps, clip_dir / "raw.mkv")
+                if (
+                    wrote_ffv1
+                    and dual_on
+                    and frames_b_bgr
+                    and not _encode_ffv1_mkv(frames_b_bgr, achieved_fps, clip_dir / "raw_b.mkv")
+                ):
+                    wrote_ffv1 = False
+
+            if not wrote_ffv1:
+                if dual_on and frames_b_bgr:
+                    frame_stack_b = np.stack(frames_b_bgr, axis=0)
+                    if storage_format == "raw_npz":
+                        np.savez_compressed(npz_path, frames=frame_stack, frames_b=frame_stack_b)
+                    else:
+                        np.savez(npz_path, frames=frame_stack, frames_b=frame_stack_b)
+                elif storage_format == "raw_npz":
+                    np.savez_compressed(npz_path, frames=frame_stack)
+                else:
+                    np.savez(npz_path, frames=frame_stack)
+
+                if storage_format != "raw_npz":
+                    raw_avi_path = clip_dir / "raw.avi"
+                    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+                    vw = cv2.VideoWriter(str(raw_avi_path), fourcc, achieved_fps, (eff_w, eff_h))
+                    for f in frames_bgr:
+                        vw.write(f)
+                    vw.release()
 
             preview_mp4_path = clip_dir / "preview.mp4"
             encode_browser_mp4(frames_bgr, achieved_fps, preview_mp4_path)
@@ -596,22 +915,34 @@ class RecordingService:
             self.db.upsert_recording(meta)
             return meta
         finally:
+            if self.preview_service is not None:
+                self.preview_service.set_recording_active(False)
             with self._lock:
                 self.is_recording = False
+                self._stop_requested = False
                 self.current_clip_id = None
                 self.progress = 1.0
 
     def import_external_clip(
         self,
-        video_bytes: bytes,
+        video_bytes: bytes | None = None,
         filename: str = "upload.mp4",
         title: str | None = None,
         true_fps_override: float | None = None,
-        max_frames: int = 600,
+        max_frames: int | None = None,
+        source_path: Path | None = None,
     ) -> dict[str, Any]:
         """Import an external video file (.mp4/.mov/.avi/.mkv) with optional True Capture FPS override."""
-        if not video_bytes:
+        has_source = source_path is not None and Path(source_path).exists() and Path(source_path).stat().st_size > 0
+        if not has_source and not video_bytes:
             raise ValueError("Uploaded video file is empty")
+
+        if max_frames is None:
+            tier = str(detect_hardware_profile().get("performance_tier", "constrained"))
+            tier_limits = {"ultra": 1500, "high": 1000, "balanced": 750, "constrained": 600}
+            eff_max_frames = tier_limits.get(tier, 600)
+        else:
+            eff_max_frames = max(2, int(max_frames))
 
         ext = Path(filename).suffix.lower()
         if ext not in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"):
@@ -621,7 +952,11 @@ class RecordingService:
         clip_id = f"clip_{timestamp_str}_{uuid.uuid4().hex[:6]}"
         clip_dir = self.layout.clip_dir(clip_id)
         src_video_path = clip_dir / f"uploaded_source{ext}"
-        src_video_path.write_bytes(video_bytes)
+        if has_source and source_path is not None:
+            shutil.copyfile(source_path, src_video_path)
+        else:
+            assert video_bytes is not None
+            src_video_path.write_bytes(video_bytes)
 
         cap = cv2.VideoCapture(str(src_video_path))
         container_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
@@ -629,12 +964,16 @@ class RecordingService:
             container_fps = 30.0
 
         frames_bgr: list[np.ndarray] = []
+        was_truncated = False
         try:
-            while len(frames_bgr) < max_frames:
+            while len(frames_bgr) < eff_max_frames:
                 ok, bgr = cap.read()
                 if not ok or bgr is None:
                     break
                 frames_bgr.append(bgr)
+            if len(frames_bgr) == eff_max_frames:
+                ok_extra, _ = cap.read()
+                was_truncated = bool(ok_extra)
         finally:
             cap.release()
 
@@ -698,6 +1037,8 @@ class RecordingService:
             "frame_count": n_frames,
             "duration_s": duration_s,
             "storage_format": "external_upload",
+            "truncated": was_truncated,
+            "max_frames_limit": eff_max_frames,
             "file_size_bytes": int(total_bytes),
             "roi": None,
             "controls": {},
@@ -848,3 +1189,155 @@ class RecordingService:
             fps=fps,
         )
         return [meta1, meta2]
+
+    def trim_clip(
+        self,
+        clip_id: str,
+        start_s: float,
+        end_s: float,
+    ) -> dict[str, Any]:
+        """Permanently trim a library clip to [start_s, end_s], updating raw frames, preview MP4, and metadata."""
+        clip_dir = self.layout.clip_dir(clip_id)
+        meta_path = clip_dir / "meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"Clip '{clip_id}' not found")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        frames_a, t_sec, achieved_fps = load_clip_frames_and_timestamps(clip_dir, stream="cam_a")
+        n_total = len(frames_a)
+        if n_total < 8:
+            raise ValueError("Clip is too short to trim further (requires >= 8 frames)")
+
+        total_dur = float(t_sec[-1] - t_sec[0]) if len(t_sec) > 1 else (n_total / max(achieved_fps, 1.0))
+        t0 = max(0.0, min(float(start_s), total_dur - 0.25))
+        t1 = max(t0 + 0.25, min(float(end_s) if end_s > 0 else total_dur, total_dur))
+
+        mask = (t_sec >= t0 - 1e-6) & (t_sec <= t1 + 1e-6)
+        indices = np.where(mask)[0]
+        if len(indices) < 6:
+            i0 = max(0, min(n_total - 6, round(t0 * achieved_fps)))
+            i1 = max(i0 + 6, min(n_total, round(t1 * achieved_fps)))
+            indices = np.arange(i0, i1)
+
+        trimmed_a = frames_a[indices]
+        n_new = len(trimmed_a)
+        new_t_sec = t_sec[indices] - float(t_sec[indices[0]])
+        new_dur_s = float(new_t_sec[-1]) if n_new > 1 else (n_new / max(achieved_fps, 1.0))
+
+        dual_on = bool(meta.get("dual_camera"))
+        trimmed_b: np.ndarray | None = None
+        npz_path = clip_dir / "raw_frames.npz"
+        if dual_on and npz_path.exists():
+            with np.load(npz_path) as data:
+                if "frames_b" in data and len(data["frames_b"]) >= int(indices[-1]) + 1:
+                    trimmed_b = data["frames_b"][indices]
+        elif dual_on:
+            with contextlib.suppress(FileNotFoundError, ValueError):
+                frames_b_all, _tb, _fb = load_clip_frames_and_timestamps(clip_dir, stream="cam_b")
+                if len(frames_b_all) >= int(indices[-1]) + 1:
+                    trimmed_b = frames_b_all[indices]
+
+        storage_format = str(meta.get("storage_format", "mjpeg_q100"))
+        eff_h, eff_w = trimmed_a.shape[1:3]
+        wrote_ffv1 = False
+        if storage_format == "ffv1_mkv":
+            wrote_ffv1 = _encode_ffv1_mkv(trimmed_a, achieved_fps, clip_dir / "raw.mkv")
+            if (
+                wrote_ffv1
+                and trimmed_b is not None
+                and not _encode_ffv1_mkv(trimmed_b, achieved_fps, clip_dir / "raw_b.mkv")
+            ):
+                wrote_ffv1 = False
+
+        if not wrote_ffv1:
+            if trimmed_b is not None:
+                if storage_format == "raw_npz":
+                    np.savez_compressed(npz_path, frames=trimmed_a, frames_b=trimmed_b)
+                else:
+                    np.savez(npz_path, frames=trimmed_a, frames_b=trimmed_b)
+            elif storage_format == "raw_npz":
+                np.savez_compressed(npz_path, frames=trimmed_a)
+            else:
+                np.savez(npz_path, frames=trimmed_a)
+
+            if storage_format != "raw_npz":
+                raw_avi_path = clip_dir / "raw.avi"
+                vw = cv2.VideoWriter(
+                    str(raw_avi_path), cv2.VideoWriter_fourcc(*"MJPG"), achieved_fps, (eff_w, eff_h)
+                )
+                for f in trimmed_a:
+                    vw.write(f)
+                vw.release()
+
+        encode_browser_mp4(trimmed_a, achieved_fps, clip_dir / "preview.mp4")
+        if trimmed_b is not None:
+            encode_browser_mp4(trimmed_b, achieved_fps, clip_dir / "preview_b.mp4")
+
+        # Rewrite timestamps.csv starting at 0 ns offset (preserving Cam B sync telemetry if present)
+        ts_path = clip_dir / "timestamps.csv"
+        orig_rows: list[dict[str, str]] = []
+        if ts_path.exists():
+            with ts_path.open("r", encoding="utf-8") as fh:
+                orig_rows = list(csv.DictReader(fh))
+        has_dual_ts = (
+            dual_on
+            and len(orig_rows) >= int(indices[-1]) + 1
+            and "timestamp_b_monotonic_ns" in orig_rows[0]
+        )
+        base_ns = 1_000_000_000
+        with ts_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if has_dual_ts:
+                writer.writerow(
+                    [
+                        "frame_index",
+                        "timestamp_monotonic_ns",
+                        "timestamp_wall_ns",
+                        "dt_ms",
+                        "timestamp_b_monotonic_ns",
+                        "sync_dt_ms",
+                    ]
+                )
+                b_vals = [
+                    int(orig_rows[int(idx)].get("timestamp_b_monotonic_ns") or 0)
+                    for idx in indices
+                ]
+                b0 = b_vals[0]
+                for i in range(n_new):
+                    m_ns = base_ns + round(float(new_t_sec[i]) * 1e9)
+                    dt_ms = (
+                        float(new_t_sec[i] - new_t_sec[i - 1]) * 1000.0 if i > 0 else 0.0
+                    )
+                    mb_ns = base_ns + (b_vals[i] - b0)
+                    sdt_str = str(orig_rows[int(indices[i])].get("sync_dt_ms") or "0.0000")
+                    writer.writerow([i, m_ns, m_ns, f"{dt_ms:.4f}", mb_ns, sdt_str])
+            else:
+                writer.writerow(
+                    ["frame_index", "timestamp_monotonic_ns", "timestamp_wall_ns", "dt_ms"]
+                )
+                for i in range(n_new):
+                    m_ns = base_ns + round(float(new_t_sec[i]) * 1e9)
+                    dt_ms = (
+                        float(new_t_sec[i] - new_t_sec[i - 1]) * 1000.0 if i > 0 else 0.0
+                    )
+                    writer.writerow([i, m_ns, m_ns, f"{dt_ms:.4f}"])
+
+        mid_idx = n_new // 2
+        if dual_on and trimmed_b is not None:
+            left_t = trimmed_a[mid_idx].copy()
+            right_t = trimmed_b[mid_idx].copy()
+            cv2.putText(left_t, "CAM A", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (56, 189, 248), 2)
+            cv2.putText(right_t, "CAM B", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (11, 158, 245), 2)
+            sbs_thumb = np.concatenate([left_t, right_t], axis=1)
+            cv2.imwrite(str(clip_dir / "thumb.jpg"), sbs_thumb)
+        else:
+            cv2.imwrite(str(clip_dir / "thumb.jpg"), trimmed_a[mid_idx])
+
+        total_bytes = sum(f.stat().st_size for f in clip_dir.iterdir() if f.is_file())
+        meta["frame_count"] = int(n_new)
+        meta["duration_s"] = round(float(new_dur_s), 3)
+        meta["file_size_bytes"] = int(total_bytes)
+        meta["trimmed_range_s"] = [round(t0, 3), round(t1, 3)]
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        self.db.upsert_recording(meta)
+        return meta

@@ -1,8 +1,8 @@
-# BenchVision — Optical Vibrometer & Motion Magnification Studio
+# BenchVision — Raspberry Pi 4 & 5 Optical Vibrometer & Motion Magnification Studio
 
-**BenchVision** is a self-contained optical vibrometer, sub-pixel motion magnification platform, and creative/nature motion extraction studio designed for **Raspberry Pi 4 / 5** and desktop workstations (Linux, macOS, and Windows).
+**BenchVision** is a self-contained optical vibrometer, sub-pixel motion magnification platform, and creative/nature motion extraction studio built specifically for **Raspberry Pi 4 and Raspberry Pi 5** (64-bit Raspberry Pi OS Bookworm / Trixie).
 
-It combines real-time motion visualization (Posy-style time-shifted frame cancellation and chrono-chromatic rainbow trails), quality-first lossless capture with locked sensor controls and nanosecond timestamps, and offline multi-scale video magnification with a full spectral diagnostic suite—all accessible from any browser on your local network.
+It combines real-time motion visualization (Posy-style time-shifted frame cancellation and chrono-chromatic rainbow trails), quality-first lossless capture with locked sensor controls and nanosecond timestamps, and offline multi-scale video magnification with a full spectral diagnostic suite—accessible from any browser on your local network (`http://<pi-ip>:8000`).
 
 ---
 
@@ -10,6 +10,7 @@ It combines real-time motion visualization (Posy-style time-shifted frame cancel
 
 ### 1. Live Preview & Real-Time Motion Extraction
 - **Live Posy Motion Extraction & Rainbow Trails:** Real-time frame-shift gray cancellation (`Subtle`, `Medium`, `Extreme`), **Posy RGB Chrono-Chromatic Trails** ($R=t, G=t-k, B=t-2k$), **Peak-Hold Motion Persistence**, and **Live Software Stroboscope** for aliasing rapid mechanical oscillations down to slow motion.
+- **Live Schlieren BOS (`schlieren`), Slit-Scan (`slit_scan`, `slit_scan_h`) & Neuromorphic Event Cam (`dvs_events`):** Background-Oriented Schlieren contrast-amplified heat/airflow shimmer visualization against a captured tare frame (`Capture Tare`), vertical and horizontal live slit-scan time ribbons, and a simulated `+ON / -OFF` asynchronous log-intensity DVS event camera with decaying time-surfaces and `kEv/s` spike telemetry.
 - **Optical Assist Overlays:** Real-time **Focus Peaking** (Laplacian edge highlight in neon green) and **Overexposure Zebras** ($\ge 250$ luma clipping warnings) to ensure sharp, unclipped edges before recording.
 - **Dual-Camera Synchronized Capture:** Hardware-aware 3-tier gating for synchronized two-angle recording (`Camera A + Camera B` or `Side-by-Side`).
 
@@ -33,21 +34,26 @@ It combines real-time motion visualization (Posy-style time-shifted frame cancel
 - **Dual-ROI Differential Phase Probes (A vs. B):** Compare two regions simultaneously to measure **Cross-Spectral Coherence** ($0\text{–}100\%$), **Phase Lag ($\Delta\phi^\circ$)**, and **In-Phase vs. Anti-Phase Resonance**.
 - **2D Lissajous & 3D Isometric Motion Orbits:** Sub-pixel $(X(t), Y(t), \text{Time})$ trajectory visualization with 2-point physical ruler calibration ($\text{mm/px}$ and peak-to-peak $\mu\text{m}/\text{mm}$ displacement).
 - **Vibration Sonification & `.WAV` Export:** Pitch-shifted audio synthesis (`1×` direct acoustic, `10×` structural, `30×` biological pulse) with real-time WebAudio playback and downloadable 16-bit PCM `.wav` files.
-- **Printable Diagnostic Reports & Animated `.GIF` Export:** One-click engineering report generation with metadata, peak metrics, annotated heatmaps, and 4-panel spectral plots.
+- **Clip Deep Inspector (`Deep Inspect` — Low-RAM Streaming):**
+  - **1. Auto-Find Vibrations (DMD):** Automatically discovers hidden resonant frequencies, damping ratios, and in-phase vs. anti-phase spatial deflection maps with one-click magnification handoff.
+  - **2. Airflow & Swirl Map (`Fluid LIC`):** Dense optical flow curl (`∇ × v`), divergence, and Line Integral Convolution flow streamlines for smoke, convection plumes, and airflow.
+  - **3. Flex & Stress Map (`Optical Strain`):** Differentiates sub-pixel displacement fields into a 2D von Mises stress concentration heatmap and stretch vs. squeeze map.
+  - **4. Light Flicker & Sound (`Rolling-Shutter Mic`):** Turns CMOS rolling-shutter row banding into super-Nyquist (`50 Hz – 12 kHz`) flicker/acoustic spectra with downloadable 16 kHz PCM `.WAV` audio.
+- **Printable Diagnostic Reports, Motion Stills & Animated `.GIF` Export:** One-click engineering report generation with metadata, peak metrics, annotated heatmaps, and 4-panel spectral plots, plus a built-in **Motion Still Studio** (`🎨 Stills` in the Clip Library) that collapses any video into **Rainbow Motion Painting** (`chrono_paint`), **Stroboscopic Multi-Exposure** (`strobe_ghost`), **Crowd / Ghost Eraser** (`median_bg`), or **Long-Exposure Motion Glow** (`motion_trails`) PNGs.
 
 ---
 
-## Quick Start
+## Quick Start (Raspberry Pi 4 & Raspberry Pi 5)
 
-### Raspberry Pi (Raspberry Pi OS Bookworm / Trixie)
+### Option A: Manual Setup (`venv` + `requirements.txt`)
 
-On Raspberry Pi OS, create the virtual environment with `--system-site-packages` so the apt-installed `python3-picamera2` and `python3-libcamera` bindings are available inside the venv:
+On 64-bit Raspberry Pi OS (Bookworm / Trixie), create the virtual environment with `--system-site-packages` so the apt-installed `python3-picamera2` and `python3-libcamera` bindings are available inside the venv:
 
 ```bash
 git clone https://github.com/your-org/BenchVision.git
 cd BenchVision
 
-# Install system dependencies (Picamera2, FFmpeg, V4L2 utilities)
+# Install Raspberry Pi system dependencies (Picamera2, libcamera, FFmpeg, V4L2 utilities)
 sudo apt-get update
 sudo apt-get install -y python3-venv python3-pip python3-picamera2 python3-libcamera v4l-utils ffmpeg libgl1 libglib2.0-0
 
@@ -62,24 +68,17 @@ pip install -r requirements.txt
 python run.py
 ```
 
-*(Alternatively, run `./scripts/install.sh` to automate apt package setup, `.venv` creation, and optional `systemd` background service registration.)*
+### Option B: Automated Installer (`scripts/install.sh`)
 
-### Linux, macOS, and Windows (Desktop / Laptop)
+Run `./scripts/install.sh` to automatically install Raspberry Pi `apt` dependencies, create `.venv` with `--system-site-packages`, and register `benchvision.service` with `systemd`:
 
 ```bash
-git clone https://github.com/your-org/BenchVision.git
-cd BenchVision
-
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-pip install -r requirements.txt
-python run.py
+./scripts/install.sh
 ```
 
 Once started, open the printed URL in your browser:
-- **Local Machine:** `http://localhost:8000`
-- **Local Network (Headless Pi):** `http://<pi-ip>:8000`
+- **On the Pi directly:** `http://localhost:8000`
+- **From any device on your local network (Headless Pi 4 / Pi 5):** `http://<pi-ip>:8000`
 
 ### CLI Options (`run.py`)
 
@@ -93,6 +92,19 @@ python run.py [--host 0.0.0.0] [--port 8000] [--data-dir ./data] [--reload]
 | `--port`, `-p` | `8000` | HTTP server port (automatically falls back to the next open port if busy) |
 | `--data-dir` | `./data` | Self-contained directory for SQLite DB, recordings, jobs, and logs |
 | `--reload` | `False` | Enable Uvicorn auto-reload for local development |
+
+---
+
+## Hardware & RAM Recommendations (Adaptive Pi 4 & Pi 5 Scaling)
+
+BenchVision automatically inspects `/proc/device-tree/model` and `/proc/meminfo` on startup (`detect_hardware_profile()`) and selects one of four **Adaptive Performance Tiers** so a **Raspberry Pi 5 (8 GB RAM)** runs completely unthrottled at full HD while a **Raspberry Pi 4 (2 GB / 4 GB)** stays protected from out-of-memory (OOM) crashes:
+
+| Hardware Target | RAM | Adaptive Tier | Default Processing Width | Pyramid Levels | Deep Inspector &amp; Motion Stills | Optical Flow Quiver & Side-by-Side | Dual-Camera Mode |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Raspberry Pi 5 (Recommended Target)** | **8 GB** | `ULTRA` | **1920 px (Full 1080p)** | **5 levels** | **`1920 px` Stills (80 frames), `224 px / 240f` DMD, `640 px` Flow/Strain, `1080 px` Flicker** | High-density `1/2` pyramid flow, `960 px` SBS panels | **Tier 3:** Unthrottled 1080p / 120 FPS |
+| **Raspberry Pi 5 / Pi 4** | **4 GB / 8 GB** | `HIGH` | **1280 px (720p HD)** | **4 levels** | `1280 px` Stills (64f), `160 px / 160f` DMD, `480 px` Flow/Strain, `720 px` Flicker | High-density `1/2` flow (Pi 5), `640 px` SBS panels | **Tier 3 (Pi 5)** / **Tier 2 (Pi 4)** |
+| **Raspberry Pi 4** | **4 GB** | `BALANCED` | **960 px** | **4 levels** | `800 px` Stills (48f), `128 px / 120f` DMD, `360 px` Flow/Strain, `480 px` Flicker | Balanced `1/3` flow, `640 px` SBS panels | **Tier 2:** Capped `640×480 @ 30 FPS` |
+| **Raspberry Pi 4 (Minimum)** | **2 GB** | `CONSTRAINED` | **640 px (VGA)** | **4 levels** | `540 px` Stills (48f), `96 px / 90f` DMD, `240 px` Flow/Strain, `360 px` Flicker | Fast `1/4` single-level flow, `480 px` SBS panels | **Tier 2:** Capped `640×480 @ 30 FPS` |
 
 ---
 
@@ -111,6 +123,8 @@ python run.py [--host 0.0.0.0] [--port 8000] [--data-dir ./data] [--reload]
 
 ```text
 BenchVision/
+├── LICENSE                         # MIT open-source license
+├── CHANGELOG.md                    # Release changelog (parsed live by /api/system)
 ├── run.py                          # Clean root CLI launcher (--host, --port, --data-dir, --reload)
 ├── requirements.txt                # Runtime Python dependencies
 ├── pyproject.toml                  # Package metadata, Ruff linter, and Pytest configuration
@@ -142,6 +156,8 @@ BenchVision/
 │   │   ├── optical_flow.py         # Dense Farnebäck optical flow warping & quiver vector overlays
 │   │   ├── motion_extraction.py    # Posy frame-shift cancellation, RGB trails & peak-hold persistence
 │   │   ├── rppg.py                 # Remote photoplethysmography (POS & green-channel pulse extraction)
+│   │   ├── stills.py               # Motion Still Studio (chrono paint, strobe ghost, median eraser, glow)
+│   │   ├── frontier.py             # Clip Deep Inspector (DMD vibration finder, airflow LIC, flex stress, flicker mic)
 │   │   └── filters.py              # Temporal Butterworth, ideal FFT, and IIR bandpass filters
 │   ├── recording/
 │   │   ├── preview.py              # Live MJPEG preview stream, Posy modes, stroboscope & focus/zebra overlays

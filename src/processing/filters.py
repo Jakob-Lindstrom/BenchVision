@@ -15,9 +15,16 @@ def clamp_passband(low_hz: float, high_hz: float, fps: float) -> tuple[float, fl
 
 
 def sanitize_1d_signal(signal_1d: np.ndarray) -> np.ndarray:
-    """Back-fill the first 4 frames (signal[:4] = signal[4]) to eliminate Frame-0 reference/exposure jumps."""
+    """Back-fill the first 4 frames and last 2 frames to eliminate start/stop reference/exposure jumps."""
     sig = np.asarray(signal_1d, dtype=np.float64)
-    if sig.ndim == 1 and len(sig) > 4:
+    if sig.ndim == 1 and len(sig) > 6:
+        if isinstance(signal_1d, np.ndarray) and signal_1d.ndim == 1 and signal_1d.flags.writeable:
+            signal_1d[:4] = signal_1d[4]
+            signal_1d[-2:] = signal_1d[-3]
+        sig = sig.copy()
+        sig[:4] = sig[4]
+        sig[-2:] = sig[-3]
+    elif sig.ndim == 1 and len(sig) > 4:
         if isinstance(signal_1d, np.ndarray) and signal_1d.ndim == 1 and signal_1d.flags.writeable:
             signal_1d[:4] = signal_1d[4]
         sig = sig.copy()
@@ -53,6 +60,16 @@ def apply_temporal_bandpass(
     flat_in = data.reshape(n_frames, n_cols)
     flat_out = out.reshape(n_frames, n_cols)
 
+    # Smooth raised-cosine (Tukey) boundary envelope for 3D video frames so magnified
+    # motion ramps smoothly in/out at the clip start and end without sudden filter spikes.
+    taper_len = min(8, n_frames // 8) if (n_cols > 1 and n_frames >= 16) else 0
+    taper_env: np.ndarray | None = None
+    if taper_len >= 2:
+        taper_env = np.ones((n_frames, 1), dtype=np.float32)
+        ramp = (0.5 * (1.0 - np.cos(np.pi * np.arange(1, taper_len + 1, dtype=np.float32) / (taper_len + 1))))[:, None]
+        taper_env[:taper_len] = ramp
+        taper_env[-taper_len:] = ramp[::-1]
+
     if filter_type == "ideal":
         freqs = np.fft.rfftfreq(n_frames, d=1.0 / fps)
         mask = ((freqs >= lo) & (freqs <= hi)).astype(np.float32)[:, None]
@@ -61,10 +78,15 @@ def apply_temporal_bandpass(
             sub = flat_in[:, c0:c1].astype(np.float32, copy=True)
             if n_cols == 1 and n_frames > 4:
                 sub[:4] = sub[4]
+            elif n_cols > 1 and n_frames > 8:
+                sub[:2] = sub[2]
             centered = sub - np.mean(sub, axis=0, keepdims=True)
             spec = np.fft.rfft(centered, axis=0)
             spec *= mask
-            flat_out[:, c0:c1] = np.fft.irfft(spec, n=n_frames, axis=0).astype(np.float32)
+            filtered_fft = np.fft.irfft(spec, n=n_frames, axis=0).astype(np.float32)
+            if taper_env is not None:
+                filtered_fft *= taper_env
+            flat_out[:, c0:c1] = filtered_fft
         return out
 
     nyq = 0.5 * fps
@@ -74,9 +96,11 @@ def apply_temporal_bandpass(
 
     for c0 in range(0, n_cols, chunk_cols):
         c1 = min(c0 + chunk_cols, n_cols)
-        sub = flat_in[:, c0:c1].astype(np.float32, copy=(n_cols == 1))
+        sub = flat_in[:, c0:c1].astype(np.float32, copy=True)
         if n_cols == 1 and n_frames > 4:
             sub[:4] = sub[4]
+        elif n_cols > 1 and n_frames > 8:
+            sub[:2] = sub[2]
         centered = sub - np.mean(sub, axis=0, keepdims=True)
         if use_iir:
             filtered = sosfilt(sos, centered, axis=0)
@@ -86,10 +110,13 @@ def apply_temporal_bandpass(
             filtered = sosfiltfilt(
                 sos, centered, axis=0, padtype="odd", padlen=padlen
             )
-        if n_cols == 1 and n_frames > 6:
-            p95 = float(np.percentile(np.abs(filtered[4:]), 95))
+        if n_cols == 1 and n_frames > 8:
+            p95 = float(np.percentile(np.abs(filtered[4:-2]), 95))
             if p95 > 1e-9:
                 filtered[:4] = np.clip(filtered[:4], -p95, p95)
+                filtered[-3:] = np.clip(filtered[-3:], -p95, p95)
+        elif taper_env is not None:
+            filtered = filtered * taper_env
         flat_out[:, c0:c1] = filtered.astype(np.float32, copy=False)
 
     return out

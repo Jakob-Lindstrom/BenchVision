@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import json
 import platform
+import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import Annotated, Any
 
 import cv2
+import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src import SCHEMA_VERSION, __version__
 from src.analysis.spectrum import (
@@ -31,11 +36,21 @@ from src.core.hardware import (
     compute_mm_per_pixel,
     detect_hardware_profile,
     evaluate_dual_camera_tier,
+    read_pi_thermal_telemetry,
 )
 from src.core.logging import read_recent_logs
 from src.processing import JobParams, estimate_processing_time_s, list_processing_methods
+from src.processing.frontier import (
+    compute_dmd_modal_xray,
+    compute_fluid_vorticity_lic,
+    compute_optical_strain_gauge,
+    compute_rolling_shutter_analysis,
+    synthesize_rolling_shutter_wav,
+)
+from src.processing.stills import render_motion_still
 from src.recording.recorder import (
     fix_v4l2m2m_mp4_bytes,
+    get_clip_frame_count,
     load_clip_frames_and_timestamps,
 )
 from src.recording.validators import (
@@ -44,6 +59,7 @@ from src.recording.validators import (
 )
 
 router = APIRouter(prefix="/api")
+_HEAVY_ANALYSIS_LOCK = threading.Lock()
 
 
 class SelectCameraRequest(BaseModel):
@@ -108,6 +124,11 @@ class SubmitJobRequest(BaseModel):
     run_async: bool = True
 
 
+class UpdateClipMetadataRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=160)
+    notes: str | None = Field(default=None, max_length=1000)
+
+
 class TareFrameRequest(BaseModel):
     enable: bool = True
 
@@ -115,6 +136,11 @@ class TareFrameRequest(BaseModel):
 class DualRoiRequest(BaseModel):
     roi_a: list[int] | None = None
     roi_b: list[int] | None = None
+
+
+class TrimClipRequest(BaseModel):
+    start_s: float = Field(default=0.0, ge=0.0, le=600.0)
+    end_s: float = Field(default=0.0, ge=0.0, le=600.0)
 
 
 @router.get("/health")
@@ -386,16 +412,18 @@ def record_preflight(req: PreflightRequest, request: Request) -> dict[str, Any]:
     )
     if not state.recording_service.is_recording:
         cam = state.camera_manager.get_active()
-        if getattr(cam, "backend_key", "") == "v4l2" and not cam.is_streaming_at(
+        if getattr(cam, "backend_key", "") in ("v4l2", "picamera2") and not cam.is_streaming_at(
             eff_w, eff_h, int(eff_fps)
         ):
-            cam.start(width=eff_w, height=eff_h, fps=int(eff_fps))
+            with contextlib.suppress(RuntimeError):
+                cam.start(width=eff_w, height=eff_h, fps=int(eff_fps))
         if dual_on:
             cam_b = state.camera_manager.get_secondary()
-            if getattr(cam_b, "backend_key", "") == "v4l2" and not cam_b.is_streaming_at(
+            if getattr(cam_b, "backend_key", "") in ("v4l2", "picamera2") and not cam_b.is_streaming_at(
                 eff_w, eff_h, int(eff_fps)
             ):
-                cam_b.start(width=eff_w, height=eff_h, fps=int(eff_fps))
+                with contextlib.suppress(RuntimeError):
+                    cam_b.start(width=eff_w, height=eff_h, fps=int(eff_fps))
     nyq = validate_nyquist_and_duration(
         fps=eff_fps,
         max_freq_hz=req.max_freq_hz,
@@ -467,6 +495,16 @@ def start_recording(req: StartRecordingRequest, request: Request) -> dict[str, A
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/record/stop")
+def stop_recording(request: Request) -> dict[str, Any]:
+    state = request.app.state.bv
+    stopped = state.recording_service.request_stop()
+    return {
+        "stopping": stopped,
+        "is_recording": state.recording_service.is_recording,
+    }
+
+
 @router.get("/record/status")
 def recording_status(request: Request) -> dict[str, Any]:
     state = request.app.state.bv
@@ -517,7 +555,6 @@ async def upload_external_clip(
     true_fps: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     state = request.app.state.bv
-    raw_bytes = await file.read()
     parsed_fps: float | None = None
     if true_fps and true_fps.strip():
         try:
@@ -526,15 +563,30 @@ async def upload_external_clip(
                 parsed_fps = val
         except ValueError:
             parsed_fps = None
+
+    ext = Path(file.filename or "upload.mp4").suffix.lower()
+    if ext not in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"):
+        ext = ".mp4"
+    tmp_path: Path | None = None
     try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_fh:
+            tmp_path = Path(tmp_fh.name)
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                tmp_fh.write(chunk)
         return state.recording_service.import_external_clip(
-            video_bytes=raw_bytes,
             filename=file.filename or "upload.mp4",
             title=title,
             true_fps_override=parsed_fps,
+            source_path=tmp_path,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 @router.get("/library/{clip_id}")
@@ -546,6 +598,32 @@ def get_clip_details(clip_id: str, request: Request) -> dict[str, Any]:
     return clip
 
 
+@router.patch("/library/{clip_id}")
+def update_clip_metadata(
+    clip_id: str, req: UpdateClipMetadataRequest, request: Request
+) -> dict[str, Any]:
+    state = request.app.state.bv
+    clean_title: str | None = None
+    if req.title is not None:
+        clean_title = req.title.strip()
+        if not clean_title:
+            raise HTTPException(status_code=400, detail="Clip title cannot be empty")
+    clean_notes = req.notes.strip() if req.notes is not None else None
+    updated = state.db.update_recording_metadata(
+        clip_id=clip_id, title=clean_title, notes=clean_notes
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    if clip_dir.exists():
+        meta_disk = {k: v for k, v in updated.items() if k != "jobs"}
+        with contextlib.suppress(OSError):
+            (clip_dir / "meta.json").write_text(
+                json.dumps(meta_disk, indent=2), encoding="utf-8"
+            )
+    return updated
+
+
 @router.delete("/library/{clip_id}")
 def delete_clip(clip_id: str, request: Request) -> dict[str, Any]:
     state = request.app.state.bv
@@ -554,6 +632,272 @@ def delete_clip(clip_id: str, request: Request) -> dict[str, Any]:
     if clip_dir.exists():
         shutil.rmtree(clip_dir, ignore_errors=True)
     return {"deleted": deleted, "clip_id": clip_id}
+
+
+@router.post("/library/{clip_id}/trim")
+def trim_library_clip(
+    clip_id: str, req: TrimClipRequest, request: Request
+) -> dict[str, Any]:
+    state = request.app.state.bv
+    try:
+        return state.recording_service.trim_clip(
+            clip_id=clip_id, start_s=req.start_s, end_s=req.end_s
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/library/{clip_id}/still")
+def render_clip_motion_still(
+    clip_id: str,
+    request: Request,
+    style: str = Query(default="chrono_paint"),
+    sensitivity: float = Query(default=1.0, ge=0.2, le=5.0),
+    strobe_count: int = Query(default=8, ge=3, le=20),
+    download: bool = Query(default=False),
+) -> Response:
+    state = request.app.state.bv
+    clip = state.db.get_recording(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    hw = detect_hardware_profile()
+    budgets = hw.get("inspector_budgets") or {}
+    max_w = int(budgets.get("still_max_width", 540))
+    still_cap = int(budgets.get("still_max_frames", 48))
+    n_total = get_clip_frame_count(clip_dir)
+    keep_count = (
+        still_cap
+        if style in ("median_bg", "chrono_paint", "motion_trails")
+        else max(24, min(still_cap, strobe_count + 16))
+    )
+    sel_idxs = (
+        [int(i) for i in np.unique(np.linspace(0, n_total - 1, min(n_total, keep_count), dtype=int))]
+        if n_total >= 2
+        else None
+    )
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, _ts, _fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_w, selected_indices=sel_idxs
+            )
+            still_bgr = render_motion_still(
+                frames, style=style, sensitivity=sensitivity, strobe_count=strobe_count
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del frames
+            gc.collect()
+    ok, enc = cv2.imencode(".png", still_bgr)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode PNG motion still")
+    headers = {"Cache-Control": "no-store"}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{clip_id}_{style}.png"'
+    return Response(content=bytes(enc), media_type="image/png", headers=headers)
+
+
+@router.get("/library/{clip_id}/frontier/dmd")
+def frontier_dmd_modal_xray(
+    clip_id: str,
+    request: Request,
+    max_modes: int = Query(default=6, ge=1, le=10),
+) -> dict[str, Any]:
+    state = request.app.state.bv
+    clip = state.db.get_recording(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    hw = detect_hardware_profile()
+    tier = str(hw.get("performance_tier", "constrained"))
+    budgets = hw.get("inspector_budgets") or {}
+    max_dim = int(budgets.get("dmd_max_dim", 96))
+    max_frames = int(budgets.get("dmd_max_frames", 90))
+    max_rank = int(budgets.get("dmd_max_rank", 14))
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, _ts, fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_dim, max_frames=max_frames
+            )
+            res = compute_dmd_modal_xray(
+                frames,
+                fps=fps,
+                max_modes=max_modes,
+                max_dim=max_dim,
+                max_frames=max_frames,
+                max_rank=max_rank,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del frames
+            gc.collect()
+    return {"clip_id": clip_id, "tier": tier, **res}
+
+
+@router.get("/library/{clip_id}/frontier/fluid")
+def frontier_fluid_vorticity(clip_id: str, request: Request) -> dict[str, Any]:
+    state = request.app.state.bv
+    clip = state.db.get_recording(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    hw = detect_hardware_profile()
+    tier = str(hw.get("performance_tier", "constrained"))
+    budgets = hw.get("inspector_budgets") or {}
+    max_w = int(budgets.get("fluid_max_width", 240))
+    pair_count = int(budgets.get("fluid_pairs", 10))
+    n_total = get_clip_frame_count(clip_dir)
+    if n_total >= 2:
+        starts = np.unique(np.linspace(0, n_total - 2, min(n_total - 1, pair_count), dtype=int))
+        pair_idxs: list[int] | None = sorted(
+            {int(k) for s in starts for k in (s, min(int(s) + 1, n_total - 1))}
+        )
+    else:
+        pair_idxs = None
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, ts, fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_w, selected_indices=pair_idxs
+            )
+            res = compute_fluid_vorticity_lic(
+                frames, fps=fps, max_width=max_w, pair_count=pair_count, timestamps_s=ts
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del frames
+            gc.collect()
+    return {"clip_id": clip_id, "tier": tier, **res}
+
+
+@router.get("/library/{clip_id}/frontier/strain")
+def frontier_optical_strain(clip_id: str, request: Request) -> dict[str, Any]:
+    state = request.app.state.bv
+    clip = state.db.get_recording(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    hw = detect_hardware_profile()
+    tier = str(hw.get("performance_tier", "constrained"))
+    budgets = hw.get("inspector_budgets") or {}
+    max_w = int(budgets.get("strain_max_width", 240))
+    scan_frames = int(budgets.get("strain_scan_frames", 21))
+    n_total = get_clip_frame_count(clip_dir)
+    if n_total >= 2:
+        ref_idxs = list(range(min(3, n_total)))
+        scan_idxs = [
+            int(i) for i in np.linspace(1, n_total - 1, min(n_total - 1, scan_frames), dtype=int)
+        ]
+        sel_idxs: list[int] | None = sorted(set(ref_idxs + scan_idxs))
+    else:
+        sel_idxs = None
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, ts, fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_w, selected_indices=sel_idxs
+            )
+            res = compute_optical_strain_gauge(frames, fps=fps, max_width=max_w, timestamps_s=ts)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del frames
+            gc.collect()
+    return {"clip_id": clip_id, "tier": tier, **res}
+
+
+@router.get("/library/{clip_id}/frontier/rolling-shutter")
+def frontier_rolling_shutter(
+    clip_id: str,
+    request: Request,
+    readout_ms: float = Query(default=16.0, ge=2.0, le=50.0),
+) -> dict[str, Any]:
+    state = request.app.state.bv
+    clip = state.db.get_recording(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    hw = detect_hardware_profile()
+    tier = str(hw.get("performance_tier", "constrained"))
+    budgets = hw.get("inspector_budgets") or {}
+    max_w = int(budgets.get("rolling_max_width", 360))
+    frame_cap = int(budgets.get("rolling_frames", 24))
+    n_total = get_clip_frame_count(clip_dir)
+    sel_idxs = (
+        [
+            int(i)
+            for i in np.unique(np.linspace(0, n_total - 1, min(n_total, frame_cap), dtype=int))
+        ]
+        if n_total >= 2
+        else None
+    )
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, _ts, fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_w, selected_indices=sel_idxs
+            )
+            res = compute_rolling_shutter_analysis(
+                frames, fps=fps, readout_ms=readout_ms, max_frames=frame_cap
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del frames
+            gc.collect()
+    return {"clip_id": clip_id, "tier": tier, "readout_ms": readout_ms, **res}
+
+
+@router.get("/library/{clip_id}/frontier/rolling-shutter.wav")
+def frontier_rolling_shutter_wav(
+    clip_id: str,
+    request: Request,
+    readout_ms: float = Query(default=16.0, ge=2.0, le=50.0),
+) -> Response:
+    state = request.app.state.bv
+    clip = state.db.get_recording(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
+    clip_dir = state.layout.clip_dir(clip_id)
+    hw = detect_hardware_profile()
+    budgets = hw.get("inspector_budgets") or {}
+    max_w = int(budgets.get("rolling_max_width", 360))
+    frame_cap = int(budgets.get("rolling_wav_frames", 32))
+    n_total = get_clip_frame_count(clip_dir)
+    sel_idxs = (
+        [
+            int(i)
+            for i in np.unique(np.linspace(0, n_total - 1, min(n_total, frame_cap), dtype=int))
+        ]
+        if n_total >= 2
+        else None
+    )
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, _ts, fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_w, selected_indices=sel_idxs
+            )
+            wav_bytes = synthesize_rolling_shutter_wav(
+                frames, fps=fps, readout_ms=readout_ms, max_frames=frame_cap
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del frames
+            gc.collect()
+    headers = {
+        "Content-Disposition": f'attachment; filename="{clip_id}_visual_mic.wav"',
+        "Cache-Control": "no-store",
+    }
+    return Response(content=wav_bytes, media_type="audio/wav", headers=headers)
 
 
 @router.get("/library/{clip_id}/auto-band")
@@ -568,10 +912,22 @@ def auto_find_clip_band(
     if clip is None:
         raise HTTPException(status_code=404, detail=f"Clip '{clip_id}' not found")
     clip_dir = state.layout.clip_dir(clip_id)
-    frames, _ts, fps = load_clip_frames_and_timestamps(clip_dir, max_width=320)
-    return compute_roi_spectrum_analysis(
-        frames_bgr=frames, fps=fps, low_hz=low_hz, high_hz=high_hz
-    )
+    hw = detect_hardware_profile()
+    budgets = hw.get("inspector_budgets") or {}
+    max_w = int(budgets.get("autoband_max_width", 240))
+    max_frames = int(budgets.get("autoband_max_frames", 180))
+    with _HEAVY_ANALYSIS_LOCK:
+        frames = None
+        try:
+            frames, _ts, fps = load_clip_frames_and_timestamps(
+                clip_dir, max_width=max_w, max_frames=max_frames
+            )
+            return compute_roi_spectrum_analysis(
+                frames_bgr=frames, fps=fps, low_hz=low_hz, high_hz=high_hz
+            )
+        finally:
+            del frames
+            gc.collect()
 
 
 @router.get("/library/{clip_id}/files/{filename}")
@@ -589,7 +945,10 @@ def get_clip_file(clip_id: str, filename: str, request: Request) -> FileResponse
 @router.get("/jobs")
 def list_all_jobs(request: Request) -> dict[str, Any]:
     state = request.app.state.bv
-    return {"jobs": state.db.list_jobs()}
+    return {
+        "jobs": state.db.list_jobs(),
+        "hardware_thermal": read_pi_thermal_telemetry(),
+    }
 
 
 @router.post("/jobs")
@@ -673,16 +1032,20 @@ def get_job_spectrum(job_id: str, request: Request) -> dict[str, Any]:
                 else float(len(raw_arr) / 30.0)
             )
             fps_est = float(max(1.0, (len(raw_arr) - 1) / max(dur_s, 1e-3)))
-            spec["spectrogram"] = compute_stft_spectrogram(
-                np.asarray(raw_arr, dtype=np.float64),
-                fps=fps_est,
-                duration_s=dur_s,
-            )
+            spec_dirty = False
+            if not spec.get("spectrogram"):
+                spec["spectrogram"] = compute_stft_spectrogram(
+                    np.asarray(raw_arr, dtype=np.float64),
+                    fps=fps_est,
+                    duration_s=dur_s,
+                )
+                spec_dirty = True
             dom_hz = float(spec.get("dominant_hz") or 0.0)
             if "lighting_aliases" not in spec:
                 spec["lighting_aliases"] = compute_lighting_aliases(
                     fps=fps_est, dominant_hz=dom_hz
                 )
+                spec_dirty = True
             cal = spec.get("calibration")
             if isinstance(cal, dict):
                 disp_mm = float(cal.get("peak_displacement_mm") or 0.0)
@@ -690,10 +1053,12 @@ def get_job_spectrum(job_id: str, request: Request) -> dict[str, Any]:
                     cal["velocity_rms_mm_s"] = round(
                         float((2.0 * np.pi * dom_hz * disp_mm) / np.sqrt(2.0)), 4
                     )
+                    spec_dirty = True
                 if "peak_accel_g" not in cal:
                     cal["peak_accel_g"] = round(
                         float((((2.0 * np.pi * dom_hz) ** 2) * disp_mm) / 9806.65), 5
                     )
+                    spec_dirty = True
             if "orbit_2d" not in spec:
                 clip_dir = state.layout.clip_dir(job["clip_id"])
                 params = job.get("params") or {}
@@ -714,6 +1079,10 @@ def get_job_spectrum(job_id: str, request: Request) -> dict[str, Any]:
                         epicenter=spec.get("epicenter"),
                         mm_per_pixel=mm_px,
                     )
+                    spec_dirty = True
+            if spec_dirty:
+                with contextlib.suppress(OSError):
+                    spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
     return spec
 
 
@@ -1015,6 +1384,52 @@ def compare_clip_methods(
     return state.job_manager.compare_jobs(clip_id, job_ids=ids)
 
 
+def _load_release_changelog() -> list[dict[str, Any]]:
+    """Parse release entries from CHANGELOG.md so /api/system stays synced automatically."""
+    changelog_path = Path(__file__).resolve().parent.parent.parent / "CHANGELOG.md"
+    entries: list[dict[str, Any]] = []
+    if changelog_path.exists():
+        current: dict[str, Any] | None = None
+        for raw_line in changelog_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            hdr = re.match(r"^##\s+\[?([^\]\s]+)\]?\s*(?:-\s*(.+))?$", line)
+            if hdr:
+                if current is not None:
+                    entries.append(current)
+                current = {
+                    "version": hdr.group(1),
+                    "date": (hdr.group(2) or "").strip(),
+                    "notes": [],
+                }
+            elif line.startswith("- ") and current is not None:
+                clean_note = line[2:].replace("**", "").strip()
+                if clean_note:
+                    current["notes"].append(clean_note)
+        if current is not None:
+            entries.append(current)
+
+    if entries:
+        return entries
+
+    return [
+        {
+            "version": __version__,
+            "date": "2026-11-19",
+            "notes": [
+                "Clip Deep Inspector (DMD vibrations, Airflow LIC, Flex Stress, Rolling-Shutter Mic)",
+                "Full 4-tier Raspberry Pi 5 (8 GB ULTRA) & Pi 4 hardware scaling",
+            ],
+        },
+        {
+            "version": "0.1.0",
+            "date": "2026-11-05",
+            "notes": [
+                "Initial CameraBackend plugin architecture and offline magnification suite",
+            ],
+        },
+    ]
+
+
 @router.get("/system")
 def get_system_status(request: Request) -> dict[str, Any]:
     state = request.app.state.bv
@@ -1027,18 +1442,7 @@ def get_system_status(request: Request) -> dict[str, Any]:
         "update_available": False,
         "schema_version": SCHEMA_VERSION,
         "hardware": hw,
-        "changelog": [
-            {
-                "version": "0.1.0",
-                "date": "2026-11-05",
-                "notes": [
-                    "Unified CameraBackend plugin architecture (USB V4L2, Picamera2 CSI, Synthetic Oscillator)",
-                    "Locked exposure/gain/WB/focus capture with nanosecond timestamps and Nyquist check",
-                    "Offline magnification plugins: Linear Eulerian, Riesz Pyramid, Complex Steerable Phase, Optical Flow, rPPG",
-                    "Welch PSD, FFT, STFT Spectrogram, Auto-Find dominant band, and side-by-side comparison",
-                ],
-            }
-        ],
+        "changelog": _load_release_changelog(),
         "platform": {
             "system": platform.system(),
             "release": platform.release(),

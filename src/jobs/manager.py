@@ -50,21 +50,21 @@ def read_mem_available_bytes() -> int | None:
 
 
 # Approximate peak working-set bytes per pixel per frame for each processing method
-# (input frames + output frames + half-res motion energy + pyramid/flow buffers + export).
+# after sequential pyramid/strip processing and intermediate buffer collection.
 _METHOD_BYTES_PER_PX: dict[str, float] = {
-    "eulerian": 13.0,
-    "riesz": 11.0,
-    "phase_steerable": 14.0,
-    "motion_extraction": 9.0,
-    "posy_rgb_trail": 8.0,
-    "posy_peak_hold": 8.0,
-    "optical_flow": 12.0,
-    "rppg": 8.0,
+    "eulerian": 9.0,
+    "riesz": 8.5,
+    "phase_steerable": 10.5,
+    "motion_extraction": 7.0,
+    "posy_rgb_trail": 6.5,
+    "posy_peak_hold": 6.5,
+    "optical_flow": 9.5,
+    "rppg": 6.5,
 }
 
 
 def fit_frames_to_memory(
-    frames_bgr: np.ndarray, method: str, avail_bytes: int | None, budget_frac: float = 0.70
+    frames_bgr: np.ndarray, method: str, avail_bytes: int | None, budget_frac: float = 0.78
 ) -> tuple[np.ndarray, float]:
     """Downscale frames spatially if the job would not fit in available RAM.
 
@@ -414,12 +414,13 @@ def render_phase_ripple_frames(
     orig_bgr: np.ndarray,
     motion_energy: np.ndarray,
     threshold: float = 0.20,
+    sub_scale: int = 4,
 ) -> Iterator[np.ndarray]:
     """Stream instantaneous phase-wave ripple map (-pi to +pi) radiating from the epicenter."""
     n, h, w, _ = orig_bgr.shape
-    # Quarter resolution keeps the three (T, h/4, w/4) float32 buffers small on a 2 GB Pi 4
-    sub_w = max(16, w // 4)
-    sub_h = max(16, h // 4)
+    div = max(2, int(sub_scale))
+    sub_w = max(16, w // div)
+    sub_h = max(16, h // div)
     osc = np.empty((n, sub_h, sub_w), dtype=np.float32)
     for t in range(n):
         gray = cv2.cvtColor(orig_bgr[t], cv2.COLOR_BGR2GRAY)
@@ -450,29 +451,35 @@ def render_quiver_frames(
     orig_bgr: np.ndarray,
     epicenter: dict[str, Any],
     step: int = 20,
+    sub_scale: int = 4,
 ) -> Iterator[np.ndarray]:
-    """Stream optical-flow directional quiver arrows over the video without duplicate baked-in crosshair."""
+    """Stream optical-flow directional quiver arrows adapted to Pi 4 vs. Pi 5 hardware tier."""
     n, h, w, _ = orig_bgr.shape
-    sub_w = max(32, w // 2)
-    sub_h = max(24, h // 2)
+    div = max(2, int(sub_scale))
+    sub_w = max(24, w // div)
+    sub_h = max(18, h // div)
     ref_gray = cv2.resize(
         cv2.cvtColor(orig_bgr[0], cv2.COLOR_BGR2GRAY), (sub_w, sub_h), interpolation=cv2.INTER_AREA
     )
     _ = epicenter
+    # Higher-precision Farnebäck pyramid on Pi 5 (div == 2), fast single-level on Pi 4 (div >= 3)
+    pyr_levels = 2 if div <= 2 else 1
+    win_size = 13 if div <= 2 else 9
+    pyr_iters = 2 if div <= 2 else 1
 
     for t in range(n):
         cur_gray = cv2.resize(
             cv2.cvtColor(orig_bgr[t], cv2.COLOR_BGR2GRAY), (sub_w, sub_h), interpolation=cv2.INTER_AREA
         )
         flow = cv2.calcOpticalFlowFarneback(
-            ref_gray, cur_gray, None, 0.5, 2, 13, 2, 5, 1.1, 0
+            ref_gray, cur_gray, None, 0.5, pyr_levels, win_size, pyr_iters, 5, 1.1, 0
         )
         canvas = orig_bgr[t].copy()
         for y in range(step // 2, h, step):
-            sy = min(sub_h - 1, y // 2)
+            sy = min(sub_h - 1, y // div)
             for x in range(step // 2, w, step):
-                sx = min(sub_w - 1, x // 2)
-                dx, dy = float(flow[sy, sx, 0]) * 2.0, float(flow[sy, sx, 1]) * 2.0
+                sx = min(sub_w - 1, x // div)
+                dx, dy = float(flow[sy, sx, 0]) * float(div), float(flow[sy, sx, 1]) * float(div)
                 mag = (dx * dx + dy * dy) ** 0.5
                 if mag > 0.04:
                     end_x = int(x + float(np.clip(dx * 14.0, -step * 1.4, step * 1.4)))
@@ -740,10 +747,17 @@ class JobQueueManager:
         self.db.upsert_job(job)
         logger.info("Starting job %s (%s) on clip %s", job_id, params.method, clip_id)
 
+        def _set_stage_progress(p: float) -> None:
+            job["progress"] = round(float(np.clip(p, 0.0, 0.99)), 3)
+            self.db.upsert_job(job)
+
         def _progress(val: float) -> bool:
             if self.is_cancelled(job_id):
                 return False
-            job["progress"] = round(float(val), 3)
+            # Map magnification algorithm progress [0, 1] -> [0.04, 0.65] so post-processing
+            # video exports and spectral analysis show continuous progress from 65% -> 100%
+            scaled = 0.04 + 0.61 * float(np.clip(val, 0.0, 1.0))
+            job["progress"] = round(scaled, 3)
             self.db.upsert_job(job)
             return True
 
@@ -841,13 +855,24 @@ class JobQueueManager:
                 vw.write(f)
             vw.release()
 
+            from src.core.hardware import detect_hardware_profile
+
+            hw_prof = detect_hardware_profile()
+            sbs_panel_w = int(hw_prof.get("sbs_panel_width", 480))
+            quiver_scale = int(hw_prof.get("quiver_sub_scale", 4))
+
+            _set_stage_progress(0.68)
             orig_mp4 = encode_browser_mp4(
                 frames_bgr, achieved_fps, res_dir / "original_share.mp4"
             )
+            _set_stage_progress(0.73)
             share_mp4 = encode_browser_mp4(
                 out.magnified_bgr, achieved_fps, res_dir / "magnified_share.mp4"
             )
-            sbs_frames = render_side_by_side_frames(frames_bgr, out.magnified_bgr)
+            _set_stage_progress(0.78)
+            sbs_frames = render_side_by_side_frames(
+                frames_bgr, out.magnified_bgr, max_panel_width=sbs_panel_w
+            )
             sbs_mp4 = encode_browser_mp4(
                 sbs_frames, achieved_fps, res_dir / "comparison_sbs.mp4"
             )
@@ -909,25 +934,34 @@ class JobQueueManager:
             out.magnified_bgr = np.empty((0,), dtype=np.uint8)
             gc.collect()
 
+            _set_stage_progress(0.83)
             heat_frames = render_heatmap_frames(
                 frames_bgr, out.motion_energy, threshold=params.heatmap_threshold
             )
             heat_mp4 = encode_browser_mp4(heat_frames, achieved_fps, res_dir / "heatmap.mp4")
             del heat_frames
 
+            _set_stage_progress(0.87)
             ripple_frames = render_phase_ripple_frames(
-                frames_bgr, out.motion_energy, threshold=params.heatmap_threshold
+                frames_bgr,
+                out.motion_energy,
+                threshold=params.heatmap_threshold,
+                sub_scale=quiver_scale,
             )
             ripple_mp4 = encode_browser_mp4(
                 ripple_frames, achieved_fps, res_dir / "phase_ripple.mp4"
             )
             del ripple_frames
 
-            quiver_frames = render_quiver_frames(frames_bgr, epicenter=epicenter)
+            _set_stage_progress(0.91)
+            quiver_frames = render_quiver_frames(
+                frames_bgr, epicenter=epicenter, sub_scale=quiver_scale
+            )
             quiver_mp4 = encode_browser_mp4(
                 quiver_frames, achieved_fps, res_dir / "quiver_vectors.mp4"
             )
             del quiver_frames
+            _set_stage_progress(0.95)
             mean_energy_2d = np.mean(out.motion_energy, axis=0)
             out.motion_energy = np.empty((0,), dtype=np.float32)
             gc.collect()

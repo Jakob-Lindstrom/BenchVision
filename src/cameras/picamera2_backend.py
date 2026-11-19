@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -82,6 +83,15 @@ def resolve_sensor_profile(model_str: str) -> dict[str, Any]:
     }
 
 
+def kelvin_to_colour_gains(wb_temp_k: int) -> tuple[float, float]:
+    """Map white balance temperature in Kelvin (2500-8000K) to libcamera (red_gain, blue_gain)."""
+    clamped_k = max(2500, min(8000, int(wb_temp_k)))
+    t = (clamped_k - 4600) / 3400.0
+    r_gain = max(0.8, min(3.2, 1.65 + 0.55 * t))
+    b_gain = max(0.8, min(3.2, 1.55 - 0.55 * t))
+    return (round(r_gain, 3), round(b_gain, 3))
+
+
 @CAMERA_REGISTRY.register("picamera2")
 class Picamera2Backend(CameraBackend):
     """Picamera2 / libcamera backend supporting Module 2, Module 3, HQ, and Global Shutter."""
@@ -99,6 +109,7 @@ class Picamera2Backend(CameraBackend):
         self.sensor_model = sensor_model
         self._picam: Any = None
         self._frame_idx = 0
+        self._lock = threading.RLock()
 
     @classmethod
     def discover(cls) -> list[dict[str, str]]:
@@ -193,82 +204,95 @@ class Picamera2Backend(CameraBackend):
         )
 
     def set_controls(self, controls: dict[str, Any]) -> CameraControlSettings:
-        updated = self.current_controls.model_dump()
-        for k, v in controls.items():
-            if k in updated and v is not None:
-                updated[k] = v
-        self.current_controls = CameraControlSettings(**updated)
+        with self._lock:
+            updated = self.current_controls.model_dump()
+            for k, v in controls.items():
+                if k in updated and v is not None:
+                    updated[k] = v
+            self.current_controls = CameraControlSettings(**updated)
 
-        if self._picam is not None:
-            libcam_ctrls: dict[str, Any] = {
-                "AeEnable": bool(self.current_controls.auto_exposure),
-                "AwbEnable": bool(self.current_controls.auto_wb),
-            }
-            if not self.current_controls.auto_exposure:
-                libcam_ctrls["ExposureTime"] = int(self.current_controls.exposure_us)
-                libcam_ctrls["AnalogueGain"] = float(self.current_controls.gain)
-            if "imx708" in self.sensor_model.lower():
-                libcam_ctrls["AfMode"] = 2 if self.current_controls.autofocus else 0
-                if not self.current_controls.autofocus:
-                    libcam_ctrls["LensPosition"] = float(self.current_controls.focus_position)
-            try:
-                self._picam.set_controls(libcam_ctrls)
-            except Exception as exc:  # noqa: BLE001
-                logging.getLogger("benchvision.cameras").debug("Picamera2 set_controls error: %s", exc)
+            if self._picam is not None:
+                libcam_ctrls: dict[str, Any] = {
+                    "AeEnable": bool(self.current_controls.auto_exposure),
+                    "AwbEnable": bool(self.current_controls.auto_wb),
+                }
+                if not self.current_controls.auto_exposure:
+                    libcam_ctrls["ExposureTime"] = int(self.current_controls.exposure_us)
+                    libcam_ctrls["AnalogueGain"] = float(self.current_controls.gain)
+                if not self.current_controls.auto_wb:
+                    libcam_ctrls["ColourGains"] = kelvin_to_colour_gains(
+                        self.current_controls.wb_temp_k
+                    )
+                if "imx708" in self.sensor_model.lower():
+                    libcam_ctrls["AfMode"] = 2 if self.current_controls.autofocus else 0
+                    if not self.current_controls.autofocus:
+                        libcam_ctrls["LensPosition"] = float(self.current_controls.focus_position)
+                try:
+                    self._picam.set_controls(libcam_ctrls)
+                except Exception as exc:  # noqa: BLE001
+                    logging.getLogger("benchvision.cameras").debug("Picamera2 set_controls error: %s", exc)
 
-        return self.current_controls
+            return self.current_controls
 
     def start(self, width: int = 640, height: int = 480, fps: int = 30) -> None:
-        if Picamera2 is None:
-            raise RuntimeError(
-                "Picamera2 is not installed. Run scripts/install.sh on Raspberry Pi OS "
-                "to install python3-picamera2 with --system-site-packages."
-            )
-        self.stop()
-        self.current_controls.width = width
-        self.current_controls.height = height
-        self.current_controls.fps = fps
-        self._frame_idx = 0
+        with self._lock:
+            if Picamera2 is None:
+                raise RuntimeError(
+                    "Picamera2 is not installed. Run scripts/install.sh on Raspberry Pi OS "
+                    "to install python3-picamera2 with --system-site-packages."
+                )
+            self.stop()
+            self.current_controls.width = width
+            self.current_controls.height = height
+            self.current_controls.fps = fps
+            self._stream_width = int(width)
+            self._stream_height = int(height)
+            self._stream_fps = int(fps)
+            self._frame_idx = 0
 
-        cam_idx = int(self.device_path) if self.device_path.isdigit() else 0
-        self._picam = Picamera2(cam_idx)
-        frame_duration_us = round(1_000_000 / max(fps, 1))
-        cfg = self._picam.create_video_configuration(
-            main={"size": (width, height), "format": "BGR888"},
-            controls={"FrameDurationLimits": (frame_duration_us, frame_duration_us)},
-        )
-        self._picam.configure(cfg)
-        self._picam.start()
-        self.running = True
+            cam_idx = int(self.device_path) if self.device_path.isdigit() else 0
+            self._picam = Picamera2(cam_idx)
+            frame_duration_us = round(1_000_000 / max(fps, 1))
+            cfg = self._picam.create_video_configuration(
+                main={"size": (width, height), "format": "BGR888"},
+                controls={"FrameDurationLimits": (frame_duration_us, frame_duration_us)},
+            )
+            self._picam.configure(cfg)
+            self._picam.start()
+            self.running = True
 
     def stop(self) -> None:
-        self.running = False
-        if self._picam is not None:
-            try:
-                self._picam.stop()
-                self._picam.close()
-            except Exception as exc:  # noqa: BLE001
-                logging.getLogger("benchvision.cameras").debug("Picamera2 stop error: %s", exc)
-            self._picam = None
+        with self._lock:
+            self.running = False
+            self._stream_width = 0
+            self._stream_height = 0
+            self._stream_fps = 0
+            if self._picam is not None:
+                try:
+                    self._picam.stop()
+                    self._picam.close()
+                except Exception as exc:  # noqa: BLE001
+                    logging.getLogger("benchvision.cameras").debug("Picamera2 stop error: %s", exc)
+                self._picam = None
 
     def get_frame(self, timeout: float = 2.0) -> FramePacket:
-        if not self.running or self._picam is None:
-            self.start(
-                self.current_controls.width,
-                self.current_controls.height,
-                self.current_controls.fps,
+        with self._lock:
+            if not self.running or self._picam is None:
+                self.start(
+                    self.current_controls.width,
+                    self.current_controls.height,
+                    self.current_controls.fps,
+                )
+            mono_ns = time.monotonic_ns()
+            wall_ns = time.time_ns()
+            arr = self._picam.capture_array("main")
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if arr.shape[-1] == 3 else arr
+            pkt = FramePacket(
+                frame_index=self._frame_idx,
+                timestamp_monotonic_ns=mono_ns,
+                timestamp_wall_ns=wall_ns,
+                bgr=bgr,
+                jpeg_bytes=None,
             )
-        mono_ns = time.monotonic_ns()
-        wall_ns = time.time_ns()
-        arr = self._picam.capture_array("main")
-        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if arr.shape[-1] == 3 else arr
-        ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-        pkt = FramePacket(
-            frame_index=self._frame_idx,
-            timestamp_monotonic_ns=mono_ns,
-            timestamp_wall_ns=wall_ns,
-            bgr=bgr,
-            jpeg_bytes=bytes(enc) if ok else None,
-        )
-        self._frame_idx += 1
-        return pkt
+            self._frame_idx += 1
+            return pkt
