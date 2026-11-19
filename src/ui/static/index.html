@@ -942,12 +942,17 @@
         <div class="card">
           <div class="card-header">
             <span class="card-title">System Version, Hardware, Storage &amp; Updates</span>
-            <button class="primary" onclick="triggerSystemUpdate()" title="Verify installed version and service health (run ./scripts/update.sh via SSH for full git updates)">Check Version &amp; Health</button>
+            <button type="button" id="btn-check-updates" class="primary" onclick="checkForGithubUpdates()" title="Check Jakob-Lindstrom/BenchVision on GitHub for new releases">Check GitHub for Updates</button>
           </div>
+          <div id="update-status-banner" class="banner" style="display: none; margin-bottom: 0.85rem;"></div>
           <div class="kpi-grid">
             <div class="kpi-box">
               <div class="kpi-label">Current Version</div>
               <div class="kpi-value" id="sys-version">1.0.0</div>
+            </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Latest on GitHub</div>
+              <div class="kpi-value" id="sys-latest-version" style="font-size: 1rem;">—</div>
             </div>
             <div class="kpi-box">
               <div class="kpi-label">Detected Hardware</div>
@@ -1265,6 +1270,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=19"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>

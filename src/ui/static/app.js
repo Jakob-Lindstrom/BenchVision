@@ -4348,9 +4348,47 @@ async function pollLiveRoiSignal() {
   }
 }
 
-async function loadSystemStatus() {
-  const data = await api('/api/system');
+async function loadSystemStatus(checkRemote = true, forceRefresh = false) {
+  const data = await api(`/api/system?check_remote=${checkRemote ? 'true' : 'false'}&force_refresh=${forceRefresh ? 'true' : 'false'}`);
   document.getElementById('sys-version').textContent = data.current_version;
+  const latestEl = document.getElementById('sys-latest-version');
+  if (latestEl) {
+    latestEl.textContent = data.update_check_status === 'offline' ? 'Offline' : `v${data.latest_version || data.current_version}`;
+  }
+  const updBanner = document.getElementById('update-status-banner');
+  if (updBanner) {
+    const repoLink = data.release_url
+      ? `<a href="${escFrontierHtml(data.release_url)}" target="_blank" rel="noopener noreferrer" style="color: var(--accent);">View Release</a>`
+      : '';
+    if (data.update_available) {
+      updBanner.style.display = 'flex';
+      updBanner.style.justifyContent = 'space-between';
+      updBanner.style.alignItems = 'center';
+      updBanner.style.gap = '0.65rem';
+      updBanner.style.flexWrap = 'wrap';
+      updBanner.className = 'banner';
+      updBanner.innerHTML = `
+        <div>
+          <strong>New BenchVision v${escFrontierHtml(data.latest_version)} is available on GitHub!</strong>
+          <span style="color: var(--text-muted); margin-left: 0.35rem;">(${escFrontierHtml(data.github_repo)})</span>
+          ${repoLink}
+        </div>
+        <button type="button" id="btn-install-update" class="primary" onclick="installGithubUpdate('${escFrontierHtml(data.latest_version)}')">
+          &#11015; Install v${escFrontierHtml(data.latest_version)} Now
+        </button>
+      `;
+    } else if (data.update_check_status === 'ok' || data.update_check_status === 'no_releases') {
+      updBanner.style.display = 'block';
+      updBanner.className = 'banner success';
+      updBanner.innerHTML = `Up to date with GitHub (<strong>${escFrontierHtml(data.github_repo)}</strong> &bull; v${escFrontierHtml(data.current_version)}) ${repoLink}`;
+    } else if (data.update_check_status === 'offline') {
+      updBanner.style.display = 'block';
+      updBanner.className = 'banner warning';
+      updBanner.textContent = `Could not reach GitHub (${data.update_check_error || 'offline'}) — local install is healthy.`;
+    } else {
+      updBanner.style.display = 'none';
+    }
+  }
   if (data.hardware) {
     updateThermalBadge(data.hardware);
     const hwEl = document.getElementById('sys-hw-model');
@@ -4398,10 +4436,59 @@ async function loadSystemStatus() {
     .join('');
 }
 
+async function checkForGithubUpdates() {
+  const btn = document.getElementById('btn-check-updates');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Checking GitHub...';
+  }
+  try {
+    await loadSystemStatus(true, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Check GitHub for Updates';
+    }
+  }
+}
+
+async function installGithubUpdate(targetVersion) {
+  const label = targetVersion ? `v${targetVersion}` : 'the latest release';
+  if (!window.confirm(`Download and install ${label} from GitHub? Your ./data folder and clips will NOT be touched.`)) {
+    return;
+  }
+  const btn = document.getElementById('btn-install-update');
+  const updBanner = document.getElementById('update-status-banner');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Installing update...';
+  }
+  try {
+    const res = await api('/api/system/update?apply=true', { method: 'POST' });
+    if (updBanner) {
+      updBanner.style.display = 'block';
+      updBanner.className = res.status === 'updated' || res.status === 'up_to_date' ? 'banner success' : 'banner danger';
+      updBanner.textContent = res.message || `Update status: ${res.status}`;
+    }
+    if (res.status === 'updated') {
+      setTimeout(() => window.location.reload(), res.restarting ? 2600 : 1200);
+    }
+  } catch (err) {
+    if (updBanner) {
+      updBanner.style.display = 'block';
+      updBanner.className = 'banner danger';
+      updBanner.textContent = `Update failed: ${err.message}`;
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = `Install ${label}`;
+    }
+  }
+}
+
 async function triggerSystemUpdate() {
-  const res = await api('/api/system/update', { method: 'POST' });
-  alert(`Update Status: ${res.status}\n${res.output || res.message || ''}`);
-  await loadSystemStatus();
+  await checkForGithubUpdates();
 }
 
 function drawMotionOrbit(canvasId, orbit) {

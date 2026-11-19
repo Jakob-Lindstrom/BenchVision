@@ -8,7 +8,6 @@ import json
 import platform
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -39,6 +38,12 @@ from src.core.hardware import (
     read_pi_thermal_telemetry,
 )
 from src.core.logging import read_recent_logs
+from src.core.updater import (
+    apply_github_release_update,
+    check_github_release,
+    get_cached_release_check,
+    get_github_repo,
+)
 from src.processing import JobParams, estimate_processing_time_s, list_processing_methods
 from src.processing.frontier import (
     compute_dmd_modal_xray,
@@ -1431,15 +1436,41 @@ def _load_release_changelog() -> list[dict[str, Any]]:
 
 
 @router.get("/system")
-def get_system_status(request: Request) -> dict[str, Any]:
+def get_system_status(
+    request: Request,
+    check_remote: bool = Query(default=False),
+    force_refresh: bool = Query(default=False),
+) -> dict[str, Any]:
     state = request.app.state.bv
     disk = state.layout.disk_usage()
     logs = read_recent_logs(state.layout.root, max_lines=100)
     hw = detect_hardware_profile()
+    repo_slug = get_github_repo()
+    if check_remote:
+        rel = check_github_release(__version__, repo=repo_slug, force_refresh=force_refresh)
+    else:
+        rel = get_cached_release_check(__version__, repo=repo_slug) or {
+            "github_repo": repo_slug,
+            "current_version": __version__,
+            "latest_version": __version__,
+            "update_available": False,
+            "release_url": f"https://github.com/{repo_slug}/releases",
+            "download_url": None,
+            "published_at": None,
+            "release_notes": "",
+            "check_status": "local_only",
+            "error": None,
+        }
     return {
         "current_version": __version__,
-        "latest_version": __version__,
-        "update_available": False,
+        "latest_version": rel.get("latest_version", __version__),
+        "update_available": bool(rel.get("update_available", False)),
+        "github_repo": rel.get("github_repo", repo_slug),
+        "release_url": rel.get("release_url", f"https://github.com/{repo_slug}/releases"),
+        "release_notes": rel.get("release_notes", ""),
+        "published_at": rel.get("published_at"),
+        "update_check_status": rel.get("check_status", "local_only"),
+        "update_check_error": rel.get("error"),
         "schema_version": SCHEMA_VERSION,
         "hardware": hw,
         "changelog": _load_release_changelog(),
@@ -1456,17 +1487,12 @@ def get_system_status(request: Request) -> dict[str, Any]:
 
 
 @router.post("/system/update")
-def trigger_manual_update() -> dict[str, Any]:
-    update_script = Path(__file__).resolve().parent.parent.parent / "scripts" / "update.sh"
-    if not update_script.exists():
-        return {"status": "skipped", "message": "scripts/update.sh not found"}
-    try:
-        out = subprocess.check_output(
-            ["bash", str(update_script), "--check-only"],
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=10.0,
-        )
-        return {"status": "ok", "output": out.strip()}
-    except subprocess.SubprocessError as exc:
-        return {"status": "error", "message": str(exc)}
+def trigger_manual_update(
+    apply: bool = Query(default=False),
+    force: bool = Query(default=False),
+) -> dict[str, Any]:
+    app_dir = Path(__file__).resolve().parent.parent.parent
+    if apply:
+        return apply_github_release_update(app_dir=app_dir, current_version=__version__, force=force)
+    rel = check_github_release(__version__, force_refresh=True)
+    return {"status": "ok", **rel}

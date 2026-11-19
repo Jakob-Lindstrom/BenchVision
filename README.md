@@ -50,7 +50,7 @@ It combines real-time motion visualization (Posy-style time-shifted frame cancel
 On 64-bit Raspberry Pi OS (Bookworm / Trixie), create the virtual environment with `--system-site-packages` so the apt-installed `python3-picamera2` and `python3-libcamera` bindings are available inside the venv:
 
 ```bash
-git clone https://github.com/your-org/BenchVision.git
+git clone https://github.com/Jakob-Lindstrom/BenchVision.git
 cd BenchVision
 
 # Install Raspberry Pi system dependencies (Picamera2, libcamera, FFmpeg, V4L2 utilities)
@@ -145,6 +145,7 @@ BenchVision/
 │   │   ├── config.py               # Pydantic settings, frequency presets, and config.json migration
 │   │   ├── hardware.py             # Raspberry Pi 4/5 detection, thermal telemetry, and mm/px geometry
 │   │   ├── logging.py              # Rotating structured logger inside <data_dir>/logs
+│   │   ├── updater.py              # GitHub Release update checker & safe rollback archive installer
 │   │   └── registry.py             # Plugin registry for cameras and magnification algorithms
 │   ├── jobs/
 │   │   └── manager.py              # Background processing worker, job artifacts, and ROI re-analysis
