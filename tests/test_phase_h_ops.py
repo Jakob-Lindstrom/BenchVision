@@ -26,6 +26,8 @@ def test_scripts_exist_and_valid_bash_syntax() -> None:
     install_text = install_sh.read_text(encoding="utf-8")
     assert "--system-site-packages" in install_text
     assert "python3-picamera2" in install_text
+    assert "git clone" in install_text
+    assert "/etc/sudoers.d/benchvision" in install_text
 
     update_text = update_sh.read_text(encoding="utf-8")
     assert "rollback" in update_text
@@ -182,5 +184,64 @@ def test_safe_release_archive_extraction_preserves_data_and_blocks_traversal(
 
     with pytest.raises(ValueError, match="traversal"):
         extract_release_archive_safely(bad_tar, app_dir)
+
+
+def test_systemd_autostart_status_and_toggle_api(monkeypatch, tmp_path: Path) -> None:
+    import types
+
+    from fastapi.testclient import TestClient
+
+    from src.core import updater
+    from src.main import create_app
+
+    calls: list[list[str]] = []
+    enabled_state = {"enabled": True}
+
+    monkeypatch.setattr(
+        updater.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl" if name == "systemctl" else None,
+    )
+
+    def fake_run(cmd: list[str], **_kwargs) -> types.SimpleNamespace:
+        calls.append(cmd)
+        if "is-enabled" in cmd:
+            return types.SimpleNamespace(
+                returncode=0 if enabled_state["enabled"] else 1,
+                stdout="enabled\n" if enabled_state["enabled"] else "disabled\n",
+                stderr="",
+            )
+        if "is-active" in cmd:
+            return types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        if "disable" in cmd:
+            enabled_state["enabled"] = False
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "enable" in cmd:
+            enabled_state["enabled"] = True
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+
+    app = create_app(data_dir=tmp_path / "data", start_worker=False, realtime_synthetic=False)
+    with TestClient(app) as client:
+        sys_data = client.get("/api/system").json()
+        assert sys_data["service"]["systemd_available"] is True
+        assert sys_data["service"]["enabled_on_boot"] is True
+
+        dis = client.post("/api/system/service", json={"enable_on_boot": False}).json()
+        assert dis["status"] == "ok"
+        assert dis["enabled_on_boot"] is False
+        assert any("disable" in c for c in calls)
+
+        ena = client.post("/api/system/service", json={"enable_on_boot": True}).json()
+        assert ena["status"] == "ok"
+        assert ena["enabled_on_boot"] is True
+        assert any("enable" in c for c in calls)
+
+        html = client.get("/").text
+        assert "sys-service-status" in html
+        assert "btn-toggle-service" in html
+
 
 

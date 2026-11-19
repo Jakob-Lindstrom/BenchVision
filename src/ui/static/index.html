@@ -982,6 +982,11 @@
               <div class="kpi-label">Data Folder Size</div>
               <div class="kpi-value" id="sys-data-mb">— MB</div>
             </div>
+            <div class="kpi-box">
+              <div class="kpi-label">Auto-Start on Boot</div>
+              <div class="kpi-value" id="sys-service-status" style="font-size: 0.92rem;">—</div>
+              <button type="button" id="btn-toggle-service" style="margin-top: 0.35rem; padding: 0.22rem 0.55rem; font-size: 0.74rem;" onclick="toggleSystemdAutostart()">Toggle Auto-Start</button>
+            </div>
           </div>
           <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem;">
             Data Directory: <code id="sys-data-dir">./data</code>
@@ -1270,6 +1275,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20"></script>
+  <script src="/static/app.js?v=21"></script>
 </body>
 </html>

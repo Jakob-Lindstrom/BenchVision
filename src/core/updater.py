@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import re
@@ -389,4 +390,146 @@ def apply_github_release_update(
             + (" Service is restarting..." if restarted_service else " Restart BenchVision to load new code.")
         ),
         **rel,
+    }
+
+
+SYSTEMD_UNIT_PATH = Path("/etc/systemd/system/benchvision.service")
+
+
+def get_systemd_service_status(app_dir: Path | None = None) -> dict[str, Any]:
+    """Inspect whether benchvision.service is installed, active, and enabled on boot."""
+    del app_dir
+    systemctl_bin = shutil.which("systemctl")
+    unit_installed = SYSTEMD_UNIT_PATH.exists()
+    enabled_on_boot = False
+    active_running = False
+
+    if systemctl_bin:
+        try:
+            en_res = subprocess.run(
+                [systemctl_bin, "is-enabled", "benchvision.service"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            enabled_on_boot = en_res.returncode == 0
+            act_res = subprocess.run(
+                [systemctl_bin, "is-active", "benchvision.service"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            active_running = act_res.returncode == 0
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    if not systemctl_bin:
+        label = "Unavailable (No systemd)"
+    elif not unit_installed and not enabled_on_boot:
+        label = "Not Installed"
+    elif enabled_on_boot:
+        label = "Enabled on Boot"
+    else:
+        label = "Disabled (Manual Start)"
+
+    return {
+        "systemd_available": bool(systemctl_bin),
+        "unit_installed": unit_installed,
+        "enabled_on_boot": enabled_on_boot,
+        "active_running": active_running,
+        "status_label": label,
+    }
+
+
+def set_systemd_autostart(app_dir: Path, enable_on_boot: bool) -> dict[str, Any]:
+    """Enable or disable benchvision.service auto-start on boot via passwordless systemctl."""
+    app_dir = Path(app_dir).resolve()
+    systemctl_bin = shutil.which("systemctl")
+    if not systemctl_bin:
+        return {
+            "status": "error",
+            "message": "systemd (systemctl) is not available on this host.",
+            **get_systemd_service_status(app_dir),
+        }
+
+    # If enabling and the unit file is not yet installed, try installing template non-interactively
+    if enable_on_boot and not SYSTEMD_UNIT_PATH.exists():
+        template_path = app_dir / "scripts" / "benchvision.service"
+        if template_path.exists():
+            try:
+                user_name = getpass.getuser()
+                unit_txt = (
+                    template_path.read_text(encoding="utf-8")
+                    .replace("__USER__", user_name)
+                    .replace("__APP_DIR__", str(app_dir))
+                )
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+                    tf.write(unit_txt)
+                    tmp_unit = Path(tf.name)
+                try:
+                    cp_res = subprocess.run(
+                        ["sudo", "-n", "cp", str(tmp_unit), str(SYSTEMD_UNIT_PATH)],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=4.0,
+                    )
+                    if cp_res.returncode == 0:
+                        subprocess.run(
+                            ["sudo", "-n", systemctl_bin, "daemon-reload"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=4.0,
+                        )
+                finally:
+                    tmp_unit.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+    action = "enable" if enable_on_boot else "disable"
+    try:
+        res = subprocess.run(
+            ["sudo", "-n", systemctl_bin, action, "benchvision.service"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "message": f"Failed to run systemctl {action}: {exc}",
+            **get_systemd_service_status(app_dir),
+        }
+
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or "").strip()
+        return {
+            "status": "needs_installer",
+            "message": (
+                "Run ./scripts/install.sh once on the Pi to install benchvision.service and enable "
+                "one-click boot toggle."
+                + (f" ({detail})" if detail else "")
+            ),
+            **get_systemd_service_status(app_dir),
+        }
+
+    status_info = get_systemd_service_status(app_dir)
+    if enable_on_boot:
+        status_info["enabled_on_boot"] = True
+        status_info["status_label"] = "Enabled on Boot"
+    else:
+        status_info["enabled_on_boot"] = False
+        status_info["status_label"] = "Disabled (Manual Start)"
+    return {
+        "status": "ok",
+        "message": (
+            "Auto-start on boot ENABLED — BenchVision will launch automatically when the Pi boots."
+            if enable_on_boot
+            else "Auto-start on boot DISABLED — start manually with python run.py."
+        ),
+        **status_info,
     }

@@ -43,6 +43,8 @@ from src.core.updater import (
     check_github_release,
     get_cached_release_check,
     get_github_repo,
+    get_systemd_service_status,
+    set_systemd_autostart,
 )
 from src.processing import JobParams, estimate_processing_time_s, list_processing_methods
 from src.processing.frontier import (
@@ -132,6 +134,10 @@ class SubmitJobRequest(BaseModel):
 class UpdateClipMetadataRequest(BaseModel):
     title: str | None = Field(default=None, max_length=160)
     notes: str | None = Field(default=None, max_length=1000)
+
+
+class ServiceAutostartRequest(BaseModel):
+    enable_on_boot: bool = True
 
 
 class TareFrameRequest(BaseModel):
@@ -1461,6 +1467,7 @@ def get_system_status(
             "check_status": "local_only",
             "error": None,
         }
+    app_dir = Path(__file__).resolve().parent.parent.parent
     return {
         "current_version": __version__,
         "latest_version": rel.get("latest_version", __version__),
@@ -1473,6 +1480,7 @@ def get_system_status(
         "update_check_error": rel.get("error"),
         "schema_version": SCHEMA_VERSION,
         "hardware": hw,
+        "service": get_systemd_service_status(app_dir),
         "changelog": _load_release_changelog(),
         "platform": {
             "system": platform.system(),
@@ -1484,6 +1492,12 @@ def get_system_status(
         "disk": disk,
         "logs": logs,
     }
+
+
+@router.post("/system/service")
+def configure_systemd_service(req: ServiceAutostartRequest) -> dict[str, Any]:
+    app_dir = Path(__file__).resolve().parent.parent.parent
+    return set_systemd_autostart(app_dir=app_dir, enable_on_boot=req.enable_on_boot)
 
 
 @router.post("/system/update")

@@ -45,7 +45,17 @@ It combines real-time motion visualization (Posy-style time-shifted frame cancel
 
 ## Quick Start (Raspberry Pi 4 & Raspberry Pi 5)
 
-### Option A: Manual Setup (`venv` + `requirements.txt`)
+### Option A: One-Line Installer (Recommended for a Brand-New Raspberry Pi)
+
+Run one command on a fresh Raspberry Pi OS (64-bit Bookworm / Trixie) to install system dependencies (`Picamera2`, `libcamera`, `FFmpeg`), clone BenchVision into `~/BenchVision`, create `.venv` with `--system-site-packages`, and enable `benchvision.service` so BenchVision **starts automatically whenever the Pi powers on**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Jakob-Lindstrom/BenchVision/master/scripts/install.sh | bash
+```
+
+*(You can turn **Auto-Start on Boot** on or off anytime inside **`5. System` → Auto-Start on Boot**.)*
+
+### Option B: Manual Setup (`venv` + `requirements.txt`)
 
 On 64-bit Raspberry Pi OS (Bookworm / Trixie), create the virtual environment with `--system-site-packages` so the apt-installed `python3-picamera2` and `python3-libcamera` bindings are available inside the venv:
 
@@ -68,9 +78,9 @@ pip install -r requirements.txt
 python run.py
 ```
 
-### Option B: Automated Installer (`scripts/install.sh`)
+### Option C: Local Repo Installer (`./scripts/install.sh`)
 
-Run `./scripts/install.sh` to automatically install Raspberry Pi `apt` dependencies, create `.venv` with `--system-site-packages`, and register `benchvision.service` with `systemd`:
+If you already cloned the repository manually, run `./scripts/install.sh` inside the folder to set up `.venv` and register/enable `benchvision.service`:
 
 ```bash
 ./scripts/install.sh

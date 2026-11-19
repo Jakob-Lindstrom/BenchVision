@@ -4418,6 +4418,20 @@ async function loadSystemStatus(checkRemote = true, forceRefresh = false) {
   document.getElementById('sys-data-mb').textContent = `${dataMb} MB`;
   document.getElementById('sys-data-dir').textContent = data.data_dir;
 
+  if (data.service) {
+    state.serviceEnabledOnBoot = Boolean(data.service.enabled_on_boot);
+    const svcEl = document.getElementById('sys-service-status');
+    if (svcEl) {
+      svcEl.textContent = data.service.status_label || (state.serviceEnabledOnBoot ? 'Enabled on Boot' : 'Disabled');
+      svcEl.style.color = state.serviceEnabledOnBoot ? '#4ade80' : 'var(--text-muted)';
+    }
+    const svcBtn = document.getElementById('btn-toggle-service');
+    if (svcBtn) {
+      svcBtn.textContent = state.serviceEnabledOnBoot ? 'Disable Auto-Start' : 'Enable Auto-Start on Boot';
+      svcBtn.disabled = !data.service.systemd_available;
+    }
+  }
+
   const clEl = document.getElementById('sys-changelog');
   clEl.innerHTML = (data.changelog || [])
     .map(
@@ -4489,6 +4503,33 @@ async function installGithubUpdate(targetVersion) {
 
 async function triggerSystemUpdate() {
   await checkForGithubUpdates();
+}
+
+async function toggleSystemdAutostart() {
+  const targetEnable = !state.serviceEnabledOnBoot;
+  const btn = document.getElementById('btn-toggle-service');
+  const updBanner = document.getElementById('update-status-banner');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api('/api/system/service', {
+      method: 'POST',
+      body: JSON.stringify({ enable_on_boot: targetEnable }),
+    });
+    if (updBanner) {
+      updBanner.style.display = 'block';
+      updBanner.className = res.status === 'ok' ? 'banner success' : 'banner warning';
+      updBanner.textContent = res.message || `Service status: ${res.status}`;
+    }
+    await loadSystemStatus(false);
+  } catch (err) {
+    if (updBanner) {
+      updBanner.style.display = 'block';
+      updBanner.className = 'banner danger';
+      updBanner.textContent = `Service toggle failed: ${err.message}`;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function drawMotionOrbit(canvasId, orbit) {
