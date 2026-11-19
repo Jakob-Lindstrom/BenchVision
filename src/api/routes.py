@@ -138,6 +138,7 @@ class UpdateClipMetadataRequest(BaseModel):
 
 class ServiceAutostartRequest(BaseModel):
     enable_on_boot: bool = True
+    sudo_password: str | None = None
 
 
 class TareFrameRequest(BaseModel):
@@ -1496,8 +1497,13 @@ def get_system_status(
 
 @router.post("/system/service")
 def configure_systemd_service(req: ServiceAutostartRequest) -> dict[str, Any]:
+    """Enable or disable benchvision.service auto-start on boot."""
     app_dir = Path(__file__).resolve().parent.parent.parent
-    return set_systemd_autostart(app_dir=app_dir, enable_on_boot=req.enable_on_boot)
+    return set_systemd_autostart(
+        app_dir=app_dir,
+        enable_on_boot=req.enable_on_boot,
+        sudo_password=req.sudo_password,
+    )
 
 
 @router.post("/system/update")

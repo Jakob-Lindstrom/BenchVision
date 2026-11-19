@@ -443,75 +443,190 @@ def get_systemd_service_status(app_dir: Path | None = None) -> dict[str, Any]:
     }
 
 
-def set_systemd_autostart(app_dir: Path, enable_on_boot: bool) -> dict[str, Any]:
-    """Enable or disable benchvision.service auto-start on boot via passwordless systemctl."""
+SYSTEMD_SUDOERS_PATH = Path("/etc/sudoers.d/benchvision")
+
+
+def _run_sudo_command(
+    cmd_args: list[str],
+    sudo_password: str | None = None,
+    timeout: float = 6.0,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a privileged command via sudo -n or sudo -S using a one-time password."""
+    pw = sudo_password if sudo_password else None
+    if pw is not None:
+        return subprocess.run(
+            ["sudo", "-S", "-p", "", *cmd_args],
+            input=f"{pw}\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    return subprocess.run(
+        ["sudo", "-n", *cmd_args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _build_sudoers_rules(user_name: str, systemctl_bin: str) -> str:
+    """Build passwordless sudoers rules matching scripts/install.sh for benchvision.service."""
+    cmds: list[str] = []
+    seen_bins: list[str] = []
+    for candidate in ("/usr/bin/systemctl", "/bin/systemctl", systemctl_bin):
+        if candidate and candidate not in seen_bins:
+            seen_bins.append(candidate)
+    for bin_path in seen_bins:
+        for action in ("enable", "disable", "start", "stop", "restart"):
+            cmds.append(f"{bin_path} {action} benchvision.service")
+        cmds.append(f"{bin_path} daemon-reload")
+    return f"{user_name} ALL=(root) NOPASSWD: {', '.join(cmds)}\n"
+
+
+def _ensure_service_and_sudoers_installed(
+    app_dir: Path,
+    systemctl_bin: str,
+    enable_on_boot: bool,
+    sudo_password: str | None = None,
+) -> subprocess.CompletedProcess[str] | None:
+    """Install benchvision.service unit and passwordless sudoers rule if missing.
+
+    Returns a failing CompletedProcess immediately on error (so a wrong password is not
+    retried repeatedly), or None when setup succeeds or is unnecessary.
+    """
+    user_name = getpass.getuser()
+
+    if enable_on_boot and not SYSTEMD_UNIT_PATH.exists():
+        template_path = app_dir / "scripts" / "benchvision.service"
+        if template_path.exists():
+            unit_txt = (
+                template_path.read_text(encoding="utf-8")
+                .replace("__USER__", user_name)
+                .replace("__APP_DIR__", str(app_dir))
+            )
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+                tf.write(unit_txt)
+                tmp_unit = Path(tf.name)
+            try:
+                cp_res = _run_sudo_command(
+                    ["cp", str(tmp_unit), str(SYSTEMD_UNIT_PATH)],
+                    sudo_password=sudo_password,
+                )
+                if cp_res.returncode != 0:
+                    return cp_res
+                reload_res = _run_sudo_command(
+                    [systemctl_bin, "daemon-reload"],
+                    sudo_password=sudo_password,
+                )
+                if reload_res.returncode != 0:
+                    return reload_res
+            finally:
+                tmp_unit.unlink(missing_ok=True)
+
+    if sudo_password and not SYSTEMD_SUDOERS_PATH.exists():
+        sudoers_txt = _build_sudoers_rules(user_name, systemctl_bin)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as sf:
+            sf.write(sudoers_txt)
+            tmp_sudoers = Path(sf.name)
+        try:
+            visudo_bin = shutil.which("visudo") or (
+                "/usr/sbin/visudo" if Path("/usr/sbin/visudo").exists() else None
+            )
+            if visudo_bin:
+                check_res = _run_sudo_command(
+                    [visudo_bin, "-cf", str(tmp_sudoers)],
+                    sudo_password=sudo_password,
+                )
+                if check_res.returncode != 0:
+                    return check_res
+            inst_res = _run_sudo_command(
+                ["install", "-m", "0440", str(tmp_sudoers), str(SYSTEMD_SUDOERS_PATH)],
+                sudo_password=sudo_password,
+            )
+            if inst_res.returncode != 0:
+                return inst_res
+        finally:
+            tmp_sudoers.unlink(missing_ok=True)
+
+    return None
+
+
+def set_systemd_autostart(
+    app_dir: Path,
+    enable_on_boot: bool,
+    sudo_password: str | None = None,
+) -> dict[str, Any]:
+    """Enable or disable benchvision.service auto-start on boot via sudo systemctl."""
     app_dir = Path(app_dir).resolve()
     systemctl_bin = shutil.which("systemctl")
     if not systemctl_bin:
         return {
             "status": "error",
+            "requires_password": False,
             "message": "systemd (systemctl) is not available on this host.",
             **get_systemd_service_status(app_dir),
         }
 
-    # If enabling and the unit file is not yet installed, try installing template non-interactively
-    if enable_on_boot and not SYSTEMD_UNIT_PATH.exists():
-        template_path = app_dir / "scripts" / "benchvision.service"
-        if template_path.exists():
-            try:
-                user_name = getpass.getuser()
-                unit_txt = (
-                    template_path.read_text(encoding="utf-8")
-                    .replace("__USER__", user_name)
-                    .replace("__APP_DIR__", str(app_dir))
-                )
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
-                    tf.write(unit_txt)
-                    tmp_unit = Path(tf.name)
-                try:
-                    cp_res = subprocess.run(
-                        ["sudo", "-n", "cp", str(tmp_unit), str(SYSTEMD_UNIT_PATH)],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=4.0,
-                    )
-                    if cp_res.returncode == 0:
-                        subprocess.run(
-                            ["sudo", "-n", systemctl_bin, "daemon-reload"],
-                            check=False,
-                            capture_output=True,
-                            text=True,
-                            timeout=4.0,
-                        )
-                finally:
-                    tmp_unit.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001, S110
-                pass
-
+    clean_pw = sudo_password if sudo_password else None
     action = "enable" if enable_on_boot else "disable"
+
     try:
-        res = subprocess.run(
-            ["sudo", "-n", systemctl_bin, action, "benchvision.service"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5.0,
+        setup_err = _ensure_service_and_sudoers_installed(
+            app_dir=app_dir,
+            systemctl_bin=systemctl_bin,
+            enable_on_boot=enable_on_boot,
+            sudo_password=clean_pw,
         )
+        if setup_err is not None:
+            res = setup_err
+        else:
+            res = _run_sudo_command(
+                [systemctl_bin, action, "benchvision.service"],
+                sudo_password=clean_pw,
+            )
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "error",
+            "requires_password": False,
             "message": f"Failed to run systemctl {action}: {exc}",
             **get_systemd_service_status(app_dir),
         }
 
     if res.returncode != 0:
         detail = (res.stderr or res.stdout or "").strip()
+        detail_low = detail.lower()
+        auth_failed = any(
+            tok in detail_low
+            for tok in ("sorry, try again", "incorrect password", "authentication failure", "password")
+        )
+        if clean_pw is not None and auth_failed:
+            return {
+                "status": "bad_password",
+                "requires_password": True,
+                "target_enable_on_boot": enable_on_boot,
+                "message": "Incorrect Raspberry Pi sudo password. Please check your password and try again.",
+                **get_systemd_service_status(app_dir),
+            }
+        if "password" in detail_low or clean_pw is None:
+            return {
+                "status": "needs_password",
+                "requires_password": True,
+                "target_enable_on_boot": enable_on_boot,
+                "message": (
+                    "Enter your Raspberry Pi sudo password once below to install benchvision.service "
+                    "and grant one-click boot toggle (only needed if you skipped ./scripts/install.sh)."
+                ),
+                **get_systemd_service_status(app_dir),
+            }
         return {
             "status": "needs_installer",
+            "requires_password": True,
+            "target_enable_on_boot": enable_on_boot,
             "message": (
-                "Run ./scripts/install.sh once on the Pi to install benchvision.service and enable "
-                "one-click boot toggle."
+                "Could not toggle benchvision.service automatically. "
+                "Enter your Raspberry Pi sudo password below or run ./scripts/install.sh in a terminal."
                 + (f" ({detail})" if detail else "")
             ),
             **get_systemd_service_status(app_dir),
@@ -519,6 +634,7 @@ def set_systemd_autostart(app_dir: Path, enable_on_boot: bool) -> dict[str, Any]
 
     status_info = get_systemd_service_status(app_dir)
     if enable_on_boot:
+        status_info["unit_installed"] = True
         status_info["enabled_on_boot"] = True
         status_info["status_label"] = "Enabled on Boot"
     else:
@@ -526,10 +642,11 @@ def set_systemd_autostart(app_dir: Path, enable_on_boot: bool) -> dict[str, Any]
         status_info["status_label"] = "Disabled (Manual Start)"
     return {
         "status": "ok",
+        "requires_password": False,
         "message": (
-            "Auto-start on boot ENABLED — BenchVision will launch automatically when the Pi boots."
+            "Auto-start on boot ENABLED — BenchVision will launch automatically whenever the Raspberry Pi boots."
             if enable_on_boot
-            else "Auto-start on boot DISABLED — start manually with python run.py."
+            else "Auto-start on boot DISABLED — BenchVision will only start when you launch it manually."
         ),
         **status_info,
     }

@@ -4356,7 +4356,7 @@ async function loadSystemStatus(checkRemote = true, forceRefresh = false) {
     latestEl.textContent = data.update_check_status === 'offline' ? 'Offline' : `v${data.latest_version || data.current_version}`;
   }
   const updBanner = document.getElementById('update-status-banner');
-  if (updBanner) {
+  if (updBanner && (checkRemote || data.update_available)) {
     const repoLink = data.release_url
       ? `<a href="${escFrontierHtml(data.release_url)}" target="_blank" rel="noopener noreferrer" style="color: var(--accent);">View Release</a>`
       : '';
@@ -4505,27 +4505,103 @@ async function triggerSystemUpdate() {
   await checkForGithubUpdates();
 }
 
-async function toggleSystemdAutostart() {
-  const targetEnable = !state.serviceEnabledOnBoot;
+function dismissServiceBanner() {
+  const svcBanner = document.getElementById('service-status-banner');
+  if (svcBanner) {
+    svcBanner.style.display = 'none';
+    svcBanner.innerHTML = '';
+  }
+}
+
+async function submitServiceSudoPassword(targetEnable) {
+  const pwInput = document.getElementById('sys-sudo-password-input');
+  const pw = pwInput ? pwInput.value : '';
+  if (!pw) {
+    if (pwInput) pwInput.focus();
+    return;
+  }
+  pwInput.value = '';
+  await toggleSystemdAutostart(Boolean(targetEnable), pw);
+}
+
+async function toggleSystemdAutostart(explicitTarget = null, sudoPassword = null) {
+  const targetEnable = explicitTarget !== null ? Boolean(explicitTarget) : !state.serviceEnabledOnBoot;
   const btn = document.getElementById('btn-toggle-service');
-  const updBanner = document.getElementById('update-status-banner');
+  const authBtn = document.getElementById('btn-authorize-service');
+  const svcBanner = document.getElementById('service-status-banner');
   if (btn) btn.disabled = true;
+  if (authBtn) {
+    authBtn.disabled = true;
+    authBtn.textContent = 'Applying...';
+  }
   try {
     const res = await api('/api/system/service', {
       method: 'POST',
-      body: JSON.stringify({ enable_on_boot: targetEnable }),
+      body: JSON.stringify({
+        enable_on_boot: targetEnable,
+        sudo_password: sudoPassword || null,
+      }),
     });
-    if (updBanner) {
-      updBanner.style.display = 'block';
-      updBanner.className = res.status === 'ok' ? 'banner success' : 'banner warning';
-      updBanner.textContent = res.message || `Service status: ${res.status}`;
+    if (svcBanner) {
+      svcBanner.style.display = 'block';
+      if (res.status === 'ok') {
+        svcBanner.className = 'banner success';
+        svcBanner.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:0.65rem; flex-wrap:wrap;">
+            <span>${escFrontierHtml(res.message || 'Auto-start setting updated.')}</span>
+            <button type="button" style="padding:0.2rem 0.55rem; font-size:0.75rem;" onclick="dismissServiceBanner()">Dismiss</button>
+          </div>
+        `;
+      } else if (
+        res.requires_password ||
+        res.status === 'needs_password' ||
+        res.status === 'bad_password' ||
+        res.status === 'needs_installer'
+      ) {
+        const isBadPw = res.status === 'bad_password';
+        svcBanner.className = isBadPw ? 'banner danger' : 'banner warning';
+        const actionVerb = targetEnable ? 'Authorize &amp; Enable Boot Start' : 'Authorize &amp; Disable Boot Start';
+        svcBanner.innerHTML = `
+          <div style="display:flex; flex-direction:column; gap:0.55rem;">
+            <div>
+              <strong>${isBadPw ? 'Incorrect Password' : 'Raspberry Pi Administrator Permission Needed'}</strong>
+              <p style="margin:0.25rem 0 0; font-size:0.84rem;">${escFrontierHtml(res.message || 'Enter your Raspberry Pi sudo password once below.')}</p>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+              <input
+                type="password"
+                id="sys-sudo-password-input"
+                autocomplete="current-password"
+                placeholder="Raspberry Pi sudo password"
+                style="max-width:240px; padding:0.35rem 0.6rem; border-radius:0.4rem; border:1px solid var(--border); background:var(--bg-main); color:var(--text-main);"
+                onkeydown="if (event.key === 'Enter') { event.preventDefault(); submitServiceSudoPassword(${targetEnable ? 'true' : 'false'}); }"
+              />
+              <button type="button" id="btn-authorize-service" class="primary" onclick="submitServiceSudoPassword(${targetEnable ? 'true' : 'false'})">${actionVerb}</button>
+              <button type="button" onclick="dismissServiceBanner()">Cancel</button>
+            </div>
+            <div style="font-size:0.76rem; color:var(--text-muted);">
+              Normally configured automatically by <code>./scripts/install.sh</code>. Authorizing once here installs the boot service permission so future toggles work with one click. Password is never saved.
+            </div>
+          </div>
+        `;
+        const pwEl = document.getElementById('sys-sudo-password-input');
+        if (pwEl) pwEl.focus();
+      } else {
+        svcBanner.className = 'banner warning';
+        svcBanner.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:0.65rem; flex-wrap:wrap;">
+            <span>${escFrontierHtml(res.message || `Service status: ${res.status}`)}</span>
+            <button type="button" style="padding:0.2rem 0.55rem; font-size:0.75rem;" onclick="dismissServiceBanner()">Dismiss</button>
+          </div>
+        `;
+      }
     }
     await loadSystemStatus(false);
   } catch (err) {
-    if (updBanner) {
-      updBanner.style.display = 'block';
-      updBanner.className = 'banner danger';
-      updBanner.textContent = `Service toggle failed: ${err.message}`;
+    if (svcBanner) {
+      svcBanner.style.display = 'block';
+      svcBanner.className = 'banner danger';
+      svcBanner.textContent = `Service toggle failed: ${err.message}`;
     }
   } finally {
     if (btn) btn.disabled = false;

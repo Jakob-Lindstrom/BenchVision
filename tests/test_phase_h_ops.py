@@ -242,6 +242,80 @@ def test_systemd_autostart_status_and_toggle_api(monkeypatch, tmp_path: Path) ->
         html = client.get("/").text
         assert "sys-service-status" in html
         assert "btn-toggle-service" in html
+        assert "service-status-banner" in html
+
+
+def test_systemd_autostart_sudo_password_flow(monkeypatch, tmp_path: Path) -> None:
+    import types
+
+    from fastapi.testclient import TestClient
+
+    from src.core import updater
+    from src.main import create_app
+
+    seen_calls: list[tuple[list[str], str | None]] = []
+    monkeypatch.setattr(
+        updater.shutil,
+        "which",
+        lambda name: "/usr/bin/systemctl" if name == "systemctl" else None,
+    )
+    monkeypatch.setattr(updater, "SYSTEMD_UNIT_PATH", tmp_path / "benchvision.service")
+    monkeypatch.setattr(updater, "SYSTEMD_SUDOERS_PATH", tmp_path / "benchvision.sudoers")
+
+    def fake_run(cmd: list[str], **kwargs) -> types.SimpleNamespace:
+        stdin_pw = kwargs.get("input")
+        seen_calls.append((cmd, stdin_pw))
+        if "is-enabled" in cmd:
+            return types.SimpleNamespace(returncode=1, stdout="disabled\n", stderr="")
+        if "is-active" in cmd:
+            return types.SimpleNamespace(returncode=1, stdout="inactive\n", stderr="")
+        if "-n" in cmd:
+            return types.SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="sudo: a password is required",
+            )
+        if "-S" in cmd:
+            if stdin_pw == "wrong-pw\n":
+                return types.SimpleNamespace(
+                    returncode=1,
+                    stdout="",
+                    stderr="sudo: 1 incorrect password attempt\nSorry, try again.",
+                )
+            if stdin_pw == "pi-secret\n":
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+
+    app = create_app(data_dir=tmp_path / "data", start_worker=False, realtime_synthetic=False)
+    with TestClient(app) as client:
+        # 1. Non-interactive toggle without sudoers asks for password
+        res_need = client.post("/api/system/service", json={"enable_on_boot": True}).json()
+        assert res_need["status"] == "needs_password"
+        assert res_need["requires_password"] is True
+
+        # 2. Wrong password returns bad_password immediately without hammering sudo
+        bad_start_count = len(seen_calls)
+        res_bad = client.post(
+            "/api/system/service",
+            json={"enable_on_boot": True, "sudo_password": "wrong-pw"},
+        ).json()
+        assert res_bad["status"] == "bad_password"
+        assert res_bad["requires_password"] is True
+        bad_sudo_cmds = [c for c, _ in seen_calls[bad_start_count:] if "-S" in c]
+        assert len(bad_sudo_cmds) == 1
+
+        # 3. Valid password uses sudo -S with stdin and succeeds
+        res_ok = client.post(
+            "/api/system/service",
+            json={"enable_on_boot": True, "sudo_password": "pi-secret"},
+        ).json()
+        assert res_ok["status"] == "ok"
+        assert res_ok["enabled_on_boot"] is True
+        ok_sudo_calls = [(c, pw) for c, pw in seen_calls if "-S" in c and pw == "pi-secret\n"]
+        assert any("enable" in c for c, _ in ok_sudo_calls)
+        assert any(str(updater.SYSTEMD_SUDOERS_PATH) in " ".join(c) for c, _ in ok_sudo_calls)
 
 
 
